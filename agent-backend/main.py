@@ -11,7 +11,10 @@ import os
 import pathlib
 
 from agent import run_agent
-from db import clear_deploys, init_db, insert_deploy, list_deploys, list_runbooks_db, upsert_runbook
+from db import (
+    clear_deploys, init_db, insert_deploy, insert_postmortem,
+    get_latest_postmortem, list_deploys, list_runbooks_db, upsert_runbook,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,18 +44,27 @@ async def receive_alert(payload: dict):
     logger.info("Webhook received: status=%s alerts=%d", status, len(alerts))
 
     for alert in alerts:
-        if alert.get("status") != "firing":
-            logger.info("Skipping non-firing alert (status=%s)", alert.get("status"))
-            continue
+        alertname = alert["labels"].get("alertname")
+        service = alert["labels"].get("job")
+        alert_status = alert.get("status")
 
-        alert_context = {
-            "alertname": alert["labels"].get("alertname"),
-            "service": alert["labels"].get("job"),
-            "severity": alert["labels"].get("severity"),
-            "description": alert.get("annotations", {}).get("description", ""),
-            "starts_at": alert.get("startsAt"),
-        }
-        asyncio.create_task(_run_agent_background(alert_context))
+        if alert_status == "firing":
+            alert_context = {
+                "alertname": alertname,
+                "service": service,
+                "severity": alert["labels"].get("severity"),
+                "description": alert.get("annotations", {}).get("description", ""),
+                "starts_at": alert.get("startsAt"),
+            }
+            asyncio.create_task(_run_agent_background(alert_context))
+
+        elif alert_status == "resolved":
+            resolved_at = alert.get("endsAt") or datetime.now(timezone.utc).isoformat()
+            logger.info("Alert resolved: %s on %s at %s", alertname, service, resolved_at)
+            asyncio.create_task(_generate_postmortem_background(alertname, service, resolved_at))
+
+        else:
+            logger.info("Skipping alert with status=%s", alert_status)
 
     return {"status": "received", "alerts_count": len(alerts)}
 
@@ -83,6 +95,37 @@ async def _run_agent_background(alert: dict) -> None:
         logger.info("=" * 70)
     except Exception:
         logger.exception("Agent failed for alert=%s service=%s", alertname, service)
+
+
+async def _generate_postmortem_background(alertname: str, service: str, resolved_at: str) -> None:
+    """Find the matching firing incident and generate a postmortem."""
+    from postmortem import generate_postmortem
+    from slack_notifier import post_slack_postmortem
+
+    # Find the most recent completed incident for this alertname + service
+    incident = None
+    for entry in reversed(list(_recent_analyses)):
+        a = entry.get("alert", {})
+        if a.get("alertname") == alertname and a.get("service") == service:
+            incident = entry
+            break
+
+    if not incident:
+        logger.warning(
+            "Resolved webhook for %s/%s but no matching firing incident found in memory",
+            alertname, service,
+        )
+        return
+
+    logger.info("Generating postmortem for %s on %s", alertname, service)
+    try:
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(None, generate_postmortem, incident, resolved_at)
+        insert_postmortem(alertname, service, content, incident)
+        await loop.run_in_executor(None, post_slack_postmortem, incident, content, resolved_at)
+        logger.info("Postmortem stored and posted for %s/%s", alertname, service)
+    except Exception:
+        logger.exception("Postmortem generation failed for %s/%s", alertname, service)
 
 
 @app.post("/deploys", status_code=201)
@@ -161,6 +204,31 @@ async def search_runbooks_endpoint(body: dict):
     top_k = int(body.get("top_k", 3))
     vec = embed(query)
     return search_runbooks_db(vec, top_k=top_k)
+
+
+@app.get("/postmortems/latest")
+async def get_latest_postmortem_endpoint():
+    """Returns the most recently generated postmortem."""
+    row = get_latest_postmortem()
+    if not row:
+        return {"status": "no_postmortem_yet"}
+    return row
+
+
+@app.post("/admin/generate-postmortem")
+async def admin_generate_postmortem(body: dict):
+    """
+    Manually trigger postmortem generation for the latest incident matching
+    alertname + service. Used by tests that don't wait for Alertmanager to resolve.
+    Body: {"alertname": "...", "service": "...", "resolved_at": "<ISO>"}
+    """
+    alertname = body.get("alertname")
+    service = body.get("service")
+    resolved_at = body.get("resolved_at") or datetime.now(timezone.utc).isoformat()
+    if not alertname or not service:
+        raise HTTPException(status_code=422, detail="alertname and service required")
+    asyncio.create_task(_generate_postmortem_background(alertname, service, resolved_at))
+    return {"status": "postmortem_generation_started"}
 
 
 @app.get("/health")

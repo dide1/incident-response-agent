@@ -165,3 +165,67 @@ def post_slack_brief(alert: dict, result: dict) -> dict:
         logger.error("Failed to post Slack brief: %s", exc)
 
     return payload
+
+
+def post_slack_postmortem(incident: dict, postmortem_md: str, resolved_at: str) -> None:
+    """Post a postmortem resolved notice to Slack."""
+    if not SLACK_WEBHOOK_URL:
+        logger.info("SLACK_WEBHOOK_URL not set — postmortem notice not posted")
+        return
+
+    alert = incident.get("alert", {})
+    result = incident.get("result", {})
+    service = alert.get("service", "unknown")
+    alertname = alert.get("alertname", "Unknown")
+    commit = result.get("likely_commit") or {}
+    sha_short = commit.get("sha", "")[:8]
+
+    # First non-heading paragraph of the postmortem as a preview
+    preview_lines = [
+        l for l in postmortem_md.splitlines()
+        if l.strip() and not l.startswith("#") and not l.startswith("**")
+    ]
+    preview = preview_lines[0][:200] if preview_lines else ""
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"✅ RESOLVED: {alertname} on {service}"},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":page_facing_up: *Postmortem auto-generated*\n"
+                    f"Root cause: `{sha_short}` — {commit.get('message', '')[:80]}\n"
+                    f"{preview}"
+                ),
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"incident-response-agent  ·  resolved {_fmt_ts(resolved_at)}"
+                        f"  ·  {service}"
+                    ),
+                }
+            ],
+        },
+    ]
+
+    body = json.dumps({"blocks": blocks}).encode()
+    req = urllib.request.Request(
+        SLACK_WEBHOOK_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            logger.info("Postmortem Slack notice posted (status=%d)", resp.status)
+    except urllib.error.URLError as exc:
+        logger.error("Failed to post postmortem Slack notice: %s", exc)

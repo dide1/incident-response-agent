@@ -52,7 +52,12 @@ def query(promql: str, since: str | None = None) -> float | None:
         if not results:
             return None
         value = results[0].get("value", [None, None])[1]
-        return float(value) if value is not None else None
+        if value is None:
+            return None
+        v = float(value)
+        # NaN / Inf are not JSON-serializable; treat as no data
+        import math
+        return v if math.isfinite(v) else None
     except Exception as exc:
         logger.warning("Prometheus query failed (%s): %s", resolved[:60], exc)
         return None

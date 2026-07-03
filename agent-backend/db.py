@@ -55,6 +55,15 @@ def init_db():
 
                         CREATE INDEX IF NOT EXISTS idx_runbooks_embedding
                             ON runbooks USING hnsw (embedding vector_cosine_ops);
+
+                        CREATE TABLE IF NOT EXISTS postmortems (
+                            id            SERIAL PRIMARY KEY,
+                            alertname     VARCHAR(200) NOT NULL,
+                            service       VARCHAR(100) NOT NULL,
+                            content       TEXT         NOT NULL,
+                            created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                            incident_data JSONB
+                        );
                     """)
                 conn.commit()
             logger.info("Database initialized")
@@ -188,6 +197,30 @@ def search_runbooks_db(query_embedding: list[float], top_k: int = 3) -> list[dic
                 (vec, vec, top_k),
             )
             return [dict(r) for r in cur.fetchall()]
+
+
+def insert_postmortem(alertname: str, service: str, content: str, incident_data: dict) -> None:
+    import json as _json
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO postmortems (alertname, service, content, incident_data)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (alertname, service, content, _json.dumps(incident_data, default=str)),
+            )
+        conn.commit()
+
+
+def get_latest_postmortem() -> dict | None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, alertname, service, content, created_at FROM postmortems ORDER BY created_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
 
 
 def list_runbooks_db() -> list[dict]:
