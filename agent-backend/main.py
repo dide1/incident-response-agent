@@ -7,8 +7,11 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 
+import os
+import pathlib
+
 from agent import run_agent
-from db import clear_deploys, init_db, insert_deploy, list_deploys
+from db import clear_deploys, init_db, insert_deploy, list_deploys, list_runbooks_db, upsert_runbook
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,9 +107,42 @@ async def get_latest_incident():
 
 @app.delete("/admin/clear-deploys", status_code=204)
 async def admin_clear_deploys():
-    """Truncate deploy tables. Test setup only — not for production use."""
+    """Truncate deploy tables. Test setup only."""
     clear_deploys()
     logger.info("Deploy tables cleared (admin)")
+
+
+@app.post("/admin/ingest-runbooks", status_code=200)
+async def ingest_runbooks():
+    """
+    Read all .md files from /runbooks, embed them, and upsert into pgvector.
+    Safe to call multiple times (upserts on filename).
+    """
+    from embedder import embed
+
+    runbooks_dir = pathlib.Path(os.getenv("RUNBOOKS_DIR", "/runbooks"))
+    if not runbooks_dir.exists():
+        raise HTTPException(status_code=500, detail=f"Runbooks directory not found: {runbooks_dir}")
+
+    ingested = []
+    for md_file in sorted(runbooks_dir.glob("*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        title_line = next((l for l in content.splitlines() if l.startswith("# ")), None)
+        title = title_line[2:].strip() if title_line else md_file.stem
+
+        # Embed title + content together so queries on either surface the runbook
+        embedding = embed(f"{title}\n\n{content}")
+        upsert_runbook(md_file.name, title, content, embedding)
+        ingested.append({"filename": md_file.name, "title": title})
+        logger.info("Ingested runbook: %s", md_file.name)
+
+    logger.info("Runbook ingestion complete: %d files", len(ingested))
+    return {"ingested": ingested, "count": len(ingested)}
+
+
+@app.get("/runbooks")
+async def list_runbooks():
+    return list_runbooks_db()
 
 
 @app.get("/health")

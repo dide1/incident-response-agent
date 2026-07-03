@@ -11,12 +11,11 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are an automated incident response agent.
 
-When given a production alert you must:
+When given a production alert you must do ALL of the following in order:
 1. Call get_recent_deploys for the affected service (use window_minutes=90)
 2. Call get_commit_diff for every commit returned — even seemingly innocuous ones
-3. Identify which commit most likely caused the alert by matching:
-   - The error type / exception message in the alert description
-   - Code changes in the diff (missing try/except, N+1 queries, external calls, etc.)
+3. Call search_runbooks with a query that combines the alert type, error signature,
+   and service name to retrieve the most relevant incident response guide
 4. Output ONLY a JSON object — no prose before or after — in this exact shape:
 
 {
@@ -28,11 +27,17 @@ When given a production alert you must:
   },
   "confidence": "high | medium | low",
   "reasoning": "<2-3 sentences citing specific file/line changes in the diff>",
-  "error_match": "<one sentence: how the diff change explains the observed error>"
+  "error_match": "<one sentence: how the diff change explains the observed error>",
+  "runbook": {
+    "filename": "<filename of top matching runbook>",
+    "title": "<runbook title>",
+    "summary": "<2-3 sentence summary of the most relevant steps from the runbook>"
+  }
 }
 
 If no recent deploys exist or none look suspicious, set likely_commit to null.
-Be specific — name the exact function or line that is the likely root cause."""
+Be specific — name the exact function or line that is the likely root cause.
+Always include the runbook field even when likely_commit is null."""
 
 
 def run_agent(alert: dict) -> dict:

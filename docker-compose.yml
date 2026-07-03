@@ -34,7 +34,7 @@ services:
       - incident-net
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     ports:
       - "5432:5432"
     environment:
@@ -83,6 +83,9 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/incidents
+      - RUNBOOKS_DIR=/runbooks
+    volumes:
+      - ./runbooks:/runbooks:ro
     depends_on:
       postgres:
         condition: service_healthy

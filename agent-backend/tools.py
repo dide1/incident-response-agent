@@ -1,7 +1,7 @@
 import json
 import logging
 
-from db import fetch_commit_diff, fetch_recent_deploys
+from db import fetch_commit_diff, fetch_recent_deploys, search_runbooks_db
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,28 @@ TOOL_DEFINITIONS = [
             "required": ["sha"],
         },
     },
+    {
+        "name": "search_runbooks",
+        "description": (
+            "Search the runbook library for the most relevant incident response guide. "
+            "Provide a query combining the alert type, error signature, and service name. "
+            "Returns the top 3 matching runbooks with title, content, and similarity score."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Natural language query describing the incident, e.g. "
+                        "'PaymentGatewayError propagating uncaught on payments-service' or "
+                        "'N+1 query causing high latency on order listing endpoint'"
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -61,9 +83,15 @@ def dispatch(name: str, inputs: dict) -> str:
         row = fetch_commit_diff(inputs["sha"])
         result = row if row else {"error": f"No diff found for SHA {inputs['sha']}"}
 
+    elif name == "search_runbooks":
+        from embedder import embed
+        query_vec = embed(inputs["query"])
+        rows = search_runbooks_db(query_vec, top_k=3)
+        result = rows if rows else [{"error": "No runbooks found — run /admin/ingest-runbooks first"}]
+
     else:
         result = {"error": f"Unknown tool: {name}"}
 
     payload = json.dumps(result, default=str)
-    logger.debug("Tool result (%s): %s", name, payload[:300])
+    logger.debug("Tool result (%s): %.300s", name, payload)
     return payload
