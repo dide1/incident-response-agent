@@ -38,28 +38,31 @@ echo "  Effect : $DESCRIPTION"
 echo "  Expect : $ALERT_TYPE alert within ~2 minutes"
 echo ""
 
-# Rewrite .env with the fault enabled
+# 1. Record the bad commit in the deploy tracker BEFORE restarting the service
+echo "  Recording bad commit..."
+python3 "$SCRIPT_DIR/record_bad_commit.py" "$SERVICE"
+
+# 2. Rewrite .env with the fault enabled
 cat > "$ENV_FILE" <<EOF
 ORDER_FAULT_MODE=false
 PAYMENT_FAULT_MODE=false
 API_FAULT_MODE=false
 EOF
 
-# Override the target service's fault mode
 sed -i.bak "s/${FAULT_VAR}=false/${FAULT_VAR}=${FAULT_VALUE}/" "$ENV_FILE"
 rm -f "${ENV_FILE}.bak"
 
-# Restart only the affected service (no rebuild needed, env var drives behavior)
+# 3. Restart only the affected service (env var drives fault behavior)
 (cd "$ROOT_DIR" && docker compose up -d --no-deps "$SERVICE")
 
 echo ""
 echo "  Service restarted with fault active."
 echo ""
 echo "  Monitor:"
+echo "    Agent logs  -> docker compose logs -f agent-backend"
 echo "    Prometheus  -> http://localhost:9090/alerts"
 echo "    Alertmanager-> http://localhost:9093"
-echo "    Webhook logs-> docker compose logs -f webhook-receiver"
 echo ""
-echo "  Run traffic generator: ./scripts/generate_traffic.sh"
+echo "  Run traffic generator (if not running): ./scripts/generate_traffic.sh"
 echo "  To heal: ./scripts/heal.sh $SERVICE"
 echo ""
