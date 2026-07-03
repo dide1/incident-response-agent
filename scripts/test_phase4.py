@@ -9,6 +9,8 @@ Tests:
   D. Slack webhook: mock server receives POST when SLACK_WEBHOOK_URL is set
 """
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -99,6 +101,27 @@ def _start_mock_webhook_server() -> HTTPServer:
     return server
 
 
+# ── Traffic generator ────────────────────────────────────────────────────────
+_traffic_proc: subprocess.Popen | None = None
+
+
+def start_traffic() -> None:
+    global _traffic_proc
+    script = os.path.join(os.path.dirname(__file__), "generate_traffic.sh")
+    _traffic_proc = subprocess.Popen(
+        ["bash", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def stop_traffic() -> None:
+    global _traffic_proc
+    if _traffic_proc and _traffic_proc.poll() is None:
+        _traffic_proc.terminate()
+        _traffic_proc = None
+
+
 # ── Seed a fault for phase 4 ────────────────────────────────────────────────
 def seed_payments_fault():
     _req("DELETE", "/admin/clear-deploys")
@@ -159,11 +182,21 @@ def fire_webhook() -> datetime:
 # ── Test A: Prometheus impact ────────────────────────────────────────────────
 section("Test A — Prometheus impact fields in agent output")
 
+print("  Starting traffic generator for 90s baseline ...")
+start_traffic()
+
+BASELINE_SECS = 90
+for elapsed in range(0, BASELINE_SECS, 15):
+    time.sleep(15)
+    print(f"  [traffic] {elapsed + 15}s / {BASELINE_SECS}s baseline")
+
+# Seed the fault commit AFTER baseline so Prometheus rate window sees the spike
 seed_payments_fault()
-print("  Firing HighErrorRate webhook for payments-service ...")
+print("  Injecting fault and firing HighErrorRate webhook ...")
 fired_at = fire_webhook()
 print("  Waiting for agent to complete (up to 120s) ...")
 entry = wait_for_incident(fired_at, timeout=120)
+stop_traffic()
 result = entry.get("result", {})
 
 impact = result.get("impact")
@@ -172,20 +205,26 @@ if impact is None:
 
 ok("'impact' field present in agent output")
 
-# Check that at least one sub-field was populated (Prometheus may not have data for
-# the test service; we accept null values but require the keys to exist)
 required_impact_keys = {"error_rate_pct", "requests_per_min", "failed_per_min", "p99_latency_s"}
 missing_keys = required_impact_keys - set(impact.keys())
 if missing_keys:
     fail(f"impact missing keys: {missing_keys}")
 ok(f"impact keys present: {sorted(impact.keys())}")
 
-# Show actual values — may be null if Prometheus has no data for test service
 for k, v in impact.items():
     if v is not None:
         ok(f"  impact.{k} = {v}")
     else:
-        warn(f"  impact.{k} = null (Prometheus has no data for payments-service — expected in test)")
+        warn(f"  impact.{k} = null")
+
+# Require at least requests_per_min to be real — traffic was running, so Prometheus
+# must have rate data. error_rate_pct may be null if the fault mode wasn't toggled.
+if impact.get("requests_per_min") is None:
+    fail(
+        "impact.requests_per_min is null after 90s of baseline traffic — "
+        "Prometheus is not scraping payments-service or metric name mismatch"
+    )
+ok(f"Confirmed real traffic metric: requests_per_min={impact['requests_per_min']:.0f}/min")
 
 
 # ── Test B: Slack brief attached to entry ────────────────────────────────────

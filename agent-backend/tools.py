@@ -74,8 +74,13 @@ TOOL_DEFINITIONS = [
             "Run a PromQL query against Prometheus and return the current scalar value. "
             "Use this to get real-time error rates, request rates, and latency figures "
             "for the affected service so the impact field contains actual numbers. "
-            "Available metrics: http_requests_total, http_request_errors_total, "
-            "http_request_duration_seconds_bucket. Labels: job=<service-name>."
+            "Available metrics: http_requests_total (with status_code label for errors — "
+            "filter with status_code=~\"5..\" for 5xx), "
+            "http_request_duration_seconds_bucket. Labels: job=<service-name>. "
+            "IMPORTANT: use {window} as the rate() duration placeholder — it will be "
+            "replaced server-side with the exact elapsed incident duration so the window "
+            "covers the spike without diluting with pre-incident baseline traffic. "
+            "Pass `since` as the alert's starts_at ISO timestamp."
         ),
         "input_schema": {
             "type": "object",
@@ -83,9 +88,19 @@ TOOL_DEFINITIONS = [
                 "promql": {
                     "type": "string",
                     "description": (
-                        "PromQL expression, e.g. "
-                        "'rate(http_request_errors_total{job=\"payments-service\"}[2m])' or "
-                        "'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"order-service\"}[2m]))'"
+                        "PromQL expression using {window} as the duration placeholder, e.g. "
+                        "'rate(http_requests_total{job=\"payments-service\",status_code=~\"5..\"}[{window}]) "
+                        "/ rate(http_requests_total{job=\"payments-service\"}[{window}])' "
+                        "or 'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket"
+                        "{job=\"order-service\"}[{window}]))'"
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 timestamp of when the alert fired (the starts_at field). "
+                        "Used to compute the {window} duration to match incident elapsed time "
+                        "and avoid diluting impact numbers with pre-incident normal traffic."
                     ),
                 },
             },
@@ -115,8 +130,8 @@ def dispatch(name: str, inputs: dict) -> str:
 
     elif name == "query_prometheus":
         from prometheus_client import query as prom_query
-        value = prom_query(inputs["promql"])
-        result = {"value": value, "promql": inputs["promql"]}
+        value = prom_query(inputs["promql"], since=inputs.get("since"))
+        result = {"value": value, "promql": inputs["promql"], "since": inputs.get("since")}
 
     else:
         result = {"error": f"Unknown tool: {name}"}

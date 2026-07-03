@@ -15,10 +15,13 @@ When given a production alert you must do ALL of the following in order:
 1. Call get_recent_deploys for the affected service (use window_minutes=90)
 2. Call get_commit_diff for every commit returned — even seemingly innocuous ones
 3. Call search_runbooks with a query combining the alert type, error signature, and service name
-4. Call query_prometheus TWICE to get real impact numbers:
-   a. Error rate:  rate(http_request_errors_total{job="<service>"}[2m]) / rate(http_requests_total{job="<service>"}[2m])
-   b. Request rate (per minute): rate(http_requests_total{job="<service>"}[2m]) * 60
-   (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[2m])))
+4. Call query_prometheus TWICE to get real impact numbers. Use {window} as the rate()
+   duration placeholder and pass `since` = the alert's starts_at so the window matches
+   the exact incident duration (not a fixed interval that dilutes with pre-incident traffic):
+   a. Error rate fraction: rate(http_requests_total{job="<service>",status_code=~"5.."}[{window}]) / rate(http_requests_total{job="<service>"}[{window}])
+      Multiply by 100 to convert to a percentage for the impact field.
+   b. Request rate (per minute): rate(http_requests_total{job="<service>"}[{window}]) * 60
+   (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[{window}])))
 5. Output ONLY a JSON object — no prose before or after — in this exact shape:
 
 {

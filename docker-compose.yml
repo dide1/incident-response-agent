@@ -84,6 +84,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/incidents
       - RUNBOOKS_DIR=/runbooks
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
     volumes:
       - ./runbooks:/runbooks:ro
     depends_on:
