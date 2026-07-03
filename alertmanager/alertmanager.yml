@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "job"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+  receiver: "webhook-receiver"
+
+receivers:
+  - name: "webhook-receiver"
+    webhook_configs:
+      - url: "http://webhook-receiver:9000/webhook"
+        send_resolved: true
