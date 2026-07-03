@@ -54,8 +54,7 @@ def init_db():
                         );
 
                         CREATE INDEX IF NOT EXISTS idx_runbooks_embedding
-                            ON runbooks USING ivfflat (embedding vector_cosine_ops)
-                            WITH (lists = 10);
+                            ON runbooks USING hnsw (embedding vector_cosine_ops);
                     """)
                 conn.commit()
             logger.info("Database initialized")
@@ -84,7 +83,7 @@ def insert_deploy(data: dict) -> None:
                 """
                 INSERT INTO deploy_tracker
                     (sha, service, deployed_at, author, commit_message, branch, is_fault)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s)
                 """,
                 (
                     data["sha"],
@@ -151,40 +150,42 @@ def list_deploys(service: str | None, limit: int) -> list[dict]:
 
 # ── Runbook store ─────────────────────────────────────────────────────────────
 
+def _vec(embedding: list[float]) -> str:
+    """Serialize a float list to pgvector literal, e.g. '[0.1,0.2,...]'."""
+    return "[" + ",".join(map(str, embedding)) + "]"
+
+
 def upsert_runbook(filename: str, title: str, content: str, embedding: list[float]) -> None:
-    from pgvector.psycopg2 import register_vector
     with get_connection() as conn:
-        register_vector(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO runbooks (filename, title, content, embedding)
-                VALUES (%s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s::vector)
                 ON CONFLICT (filename) DO UPDATE
                     SET title = EXCLUDED.title,
                         content = EXCLUDED.content,
                         embedding = EXCLUDED.embedding
                 """,
-                (filename, title, content, embedding),
+                (filename, title, content, _vec(embedding)),
             )
         conn.commit()
 
 
 def search_runbooks_db(query_embedding: list[float], top_k: int = 3) -> list[dict]:
-    from pgvector.psycopg2 import register_vector
+    vec = _vec(query_embedding)
     with get_connection() as conn:
-        register_vector(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT filename, title, content,
-                       ROUND((1 - (embedding <=> %s))::numeric, 3) AS similarity
+                       ROUND((1 - (embedding <=> %s::vector))::numeric, 3) AS similarity
                 FROM runbooks
                 WHERE embedding IS NOT NULL
-                ORDER BY embedding <=> %s
+                ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (query_embedding, query_embedding, top_k),
+                (vec, vec, top_k),
             )
             return [dict(r) for r in cur.fetchall()]
 

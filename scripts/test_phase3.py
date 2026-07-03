@@ -33,7 +33,8 @@ def _req(method, path, body=None):
     )
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.status, json.loads(resp.read())
+            body = resp.read()
+            return resp.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as exc:
         return exc.code, {}
 

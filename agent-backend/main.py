@@ -145,6 +145,19 @@ async def list_runbooks():
     return list_runbooks_db()
 
 
+@app.post("/runbooks/search")
+async def search_runbooks_endpoint(body: dict):
+    """Direct vector search endpoint for probing/debugging retrieval quality."""
+    from embedder import embed
+    from db import search_runbooks_db
+    query = body.get("query", "")
+    if not query:
+        raise HTTPException(status_code=422, detail="query field required")
+    top_k = int(body.get("top_k", 3))
+    vec = embed(query)
+    return search_runbooks_db(vec, top_k=top_k)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "agent-backend"}
