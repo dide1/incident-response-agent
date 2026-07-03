@@ -65,9 +65,14 @@ async def _run_agent_background(alert: dict) -> None:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, run_agent, alert)
 
+        # Post Slack brief (no-op when SLACK_WEBHOOK_URL is unset)
+        from slack_notifier import post_slack_brief
+        slack_payload = await loop.run_in_executor(None, post_slack_brief, alert, result)
+
         entry = {
             "alert": alert,
             "result": result,
+            "slack_brief": slack_payload,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
         _recent_analyses.append(entry)

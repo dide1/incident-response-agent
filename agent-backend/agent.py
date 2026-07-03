@@ -14,9 +14,12 @@ SYSTEM_PROMPT = """You are an automated incident response agent.
 When given a production alert you must do ALL of the following in order:
 1. Call get_recent_deploys for the affected service (use window_minutes=90)
 2. Call get_commit_diff for every commit returned — even seemingly innocuous ones
-3. Call search_runbooks with a query that combines the alert type, error signature,
-   and service name to retrieve the most relevant incident response guide
-4. Output ONLY a JSON object — no prose before or after — in this exact shape:
+3. Call search_runbooks with a query combining the alert type, error signature, and service name
+4. Call query_prometheus TWICE to get real impact numbers:
+   a. Error rate:  rate(http_request_errors_total{job="<service>"}[2m]) / rate(http_requests_total{job="<service>"}[2m])
+   b. Request rate (per minute): rate(http_requests_total{job="<service>"}[2m]) * 60
+   (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[2m])))
+5. Output ONLY a JSON object — no prose before or after — in this exact shape:
 
 {
   "likely_commit": {
@@ -28,6 +31,12 @@ When given a production alert you must do ALL of the following in order:
   "confidence": "high | medium | low",
   "reasoning": "<2-3 sentences citing specific file/line changes in the diff>",
   "error_match": "<one sentence: how the diff change explains the observed error>",
+  "impact": {
+    "error_rate_pct": <0-100 integer from Prometheus, or null if unavailable>,
+    "requests_per_min": <integer from Prometheus, or null>,
+    "failed_per_min": <integer derived as requests_per_min * error_rate_pct/100, or null>,
+    "p99_latency_s": <float for latency alerts, or null>
+  },
   "runbook": {
     "filename": "<filename of top matching runbook>",
     "title": "<runbook title>",
@@ -37,7 +46,8 @@ When given a production alert you must do ALL of the following in order:
 
 If no recent deploys exist or none look suspicious, set likely_commit to null.
 Be specific — name the exact function or line that is the likely root cause.
-Always include the runbook field even when likely_commit is null."""
+Always include the runbook and impact fields even when likely_commit is null.
+If Prometheus returns null for a metric, set the corresponding impact field to null."""
 
 
 def run_agent(alert: dict) -> dict:

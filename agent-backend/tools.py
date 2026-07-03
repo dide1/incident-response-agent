@@ -68,6 +68,30 @@ TOOL_DEFINITIONS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "query_prometheus",
+        "description": (
+            "Run a PromQL query against Prometheus and return the current scalar value. "
+            "Use this to get real-time error rates, request rates, and latency figures "
+            "for the affected service so the impact field contains actual numbers. "
+            "Available metrics: http_requests_total, http_request_errors_total, "
+            "http_request_duration_seconds_bucket. Labels: job=<service-name>."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "promql": {
+                    "type": "string",
+                    "description": (
+                        "PromQL expression, e.g. "
+                        "'rate(http_request_errors_total{job=\"payments-service\"}[2m])' or "
+                        "'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"order-service\"}[2m]))'"
+                    ),
+                },
+            },
+            "required": ["promql"],
+        },
+    },
 ]
 
 
@@ -88,6 +112,11 @@ def dispatch(name: str, inputs: dict) -> str:
         query_vec = embed(inputs["query"])
         rows = search_runbooks_db(query_vec, top_k=3)
         result = rows if rows else [{"error": "No runbooks found — run /admin/ingest-runbooks first"}]
+
+    elif name == "query_prometheus":
+        from prometheus_client import query as prom_query
+        value = prom_query(inputs["promql"])
+        result = {"value": value, "promql": inputs["promql"]}
 
     else:
         result = {"error": f"Unknown tool: {name}"}
