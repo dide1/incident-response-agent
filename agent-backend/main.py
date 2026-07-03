@@ -1,12 +1,14 @@
 import asyncio
 import json
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 
 from agent import run_agent
-from db import init_db, insert_deploy, list_deploys
+from db import clear_deploys, init_db, insert_deploy, list_deploys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,6 +16,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Keeps the last 20 completed analyses in memory for test querying
+_recent_analyses: deque = deque(maxlen=20)
 
 
 @asynccontextmanager
@@ -57,6 +62,13 @@ async def _run_agent_background(alert: dict) -> None:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, run_agent, alert)
 
+        entry = {
+            "alert": alert,
+            "result": result,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _recent_analyses.append(entry)
+
         logger.info("=" * 70)
         logger.info("AGENT ANALYSIS  alert=%s  service=%s", alertname, service)
         logger.info(json.dumps(result, indent=2, default=str))
@@ -67,7 +79,7 @@ async def _run_agent_background(alert: dict) -> None:
 
 @app.post("/deploys", status_code=201)
 async def record_deploy(deploy: dict):
-    """Record a deployment. Called by inject_fault.sh / seed_deploys.py via curl."""
+    """Record a deployment. Called by inject_fault.sh / seed_deploys.py."""
     required = {"sha", "service", "author", "commit_message"}
     missing = required - deploy.keys()
     if missing:
@@ -80,6 +92,21 @@ async def record_deploy(deploy: dict):
 @app.get("/deploys")
 async def get_deploys(service: str = None, limit: int = 20):
     return list_deploys(service=service, limit=limit)
+
+
+@app.get("/incidents/latest")
+async def get_latest_incident():
+    """Returns the most recent completed agent analysis. Used by test scripts."""
+    if not _recent_analyses:
+        return {"status": "no_analysis_yet"}
+    return list(_recent_analyses)[-1]
+
+
+@app.delete("/admin/clear-deploys", status_code=204)
+async def admin_clear_deploys():
+    """Truncate deploy tables. Test setup only — not for production use."""
+    clear_deploys()
+    logger.info("Deploy tables cleared (admin)")
 
 
 @app.get("/health")

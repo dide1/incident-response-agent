@@ -112,6 +112,13 @@ def fetch_commit_diff(sha: str) -> dict | None:
     return dict(row) if row else None
 
 
+def clear_deploys() -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE deploy_tracker, commit_diffs")
+        conn.commit()
+
+
 def list_deploys(service: str | None, limit: int) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:

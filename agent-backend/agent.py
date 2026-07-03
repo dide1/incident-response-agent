@@ -1,6 +1,7 @@
 """Claude tool-use agent: correlates an alert to the most likely bad commit."""
 import json
 import logging
+import re
 
 import anthropic
 
@@ -66,16 +67,25 @@ def run_agent(alert: dict) -> dict:
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason == "end_turn":
-            # Extract JSON from the first text block
+            # Extract JSON from the first text block.
+            # The model sometimes wraps the JSON in prose before a code fence,
+            # so we search for the fence with regex rather than checking startswith.
             for block in response.content:
                 if hasattr(block, "text"):
                     text = block.text.strip()
-                    # Strip markdown code fences if present
-                    if text.startswith("```"):
-                        text = "\n".join(text.split("\n")[1:])
-                        text = text.rstrip("`").strip()
+                    candidate = text
+
+                    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+                    if fence:
+                        candidate = fence.group(1)
+                    elif not text.startswith("{"):
+                        # Fall back: find the first top-level JSON object
+                        brace = text.find("\n{")
+                        if brace >= 0:
+                            candidate = text[brace + 1:]
+
                     try:
-                        result = json.loads(text)
+                        result = json.loads(candidate)
                     except json.JSONDecodeError:
                         result = {"raw_output": block.text}
                     result["tool_log"] = tool_log
