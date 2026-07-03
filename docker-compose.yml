@@ -1,0 +1,86 @@
+version: "3.8"
+
+services:
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8080:8000"
+    environment:
+      - FAULT_MODE=${API_FAULT_MODE:-false}
+      - ORDER_SERVICE_URL=http://order-service:8000
+      - PAYMENTS_SERVICE_URL=http://payments-service:8000
+    depends_on:
+      - order-service
+      - payments-service
+    networks:
+      - incident-net
+
+  order-service:
+    build: ./services/order-service
+    ports:
+      - "8081:8000"
+    environment:
+      - FAULT_MODE=${ORDER_FAULT_MODE:-false}
+    networks:
+      - incident-net
+
+  payments-service:
+    build: ./services/payments-service
+    ports:
+      - "8082:8000"
+    environment:
+      - FAULT_MODE=${PAYMENT_FAULT_MODE:-false}
+    networks:
+      - incident-net
+
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=incidents
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - incident-net
+
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    networks:
+      - incident-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    networks:
+      - incident-net
+
+  webhook-receiver:
+    build: ./webhook-receiver
+    ports:
+      - "9000:9000"
+    networks:
+      - incident-net
+
+networks:
+  incident-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
