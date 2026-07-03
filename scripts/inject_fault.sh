@@ -42,15 +42,20 @@ echo ""
 echo "  Recording bad commit..."
 python3 "$SCRIPT_DIR/record_bad_commit.py" "$SERVICE"
 
-# 2. Rewrite .env with the fault enabled
-cat > "$ENV_FILE" <<EOF
-ORDER_FAULT_MODE=false
-PAYMENT_FAULT_MODE=false
-API_FAULT_MODE=false
-EOF
+# 2. Update only the relevant fault mode variable in .env (preserve other vars like API keys)
+_set_env_var() {
+  local key="$1" val="$2"
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+  else
+    echo "${key}=${val}" >> "$ENV_FILE"
+  fi
+}
 
-sed -i.bak "s/${FAULT_VAR}=false/${FAULT_VAR}=${FAULT_VALUE}/" "$ENV_FILE"
-rm -f "${ENV_FILE}.bak"
+_set_env_var "ORDER_FAULT_MODE"   "false"
+_set_env_var "PAYMENT_FAULT_MODE" "false"
+_set_env_var "API_FAULT_MODE"     "false"
+_set_env_var "$FAULT_VAR"         "$FAULT_VALUE"
 
 # 3. Restart only the affected service (env var drives fault behavior)
 (cd "$ROOT_DIR" && docker compose up -d --no-deps "$SERVICE")
