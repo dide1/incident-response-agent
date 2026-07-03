@@ -6,10 +6,10 @@ route:
   group_wait: 10s
   group_interval: 30s
   repeat_interval: 1h
-  receiver: "webhook-receiver"
+  receiver: "agent-backend"
 
 receivers:
-  - name: "webhook-receiver"
+  - name: "agent-backend"
     webhook_configs:
-      - url: "http://webhook-receiver:9000/webhook"
+      - url: "http://agent-backend:9000/webhook"
         send_resolved: true

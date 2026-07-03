@@ -43,6 +43,11 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - incident-net
 
@@ -71,10 +76,16 @@ services:
     networks:
       - incident-net
 
-  webhook-receiver:
-    build: ./webhook-receiver
+  agent-backend:
+    build: ./agent-backend
     ports:
       - "9000:9000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/incidents
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - incident-net
 
