@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
-BASE_URL = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:8090"
+BASE_URL = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://localhost:9000"
 
 
 def post(path: str, data: dict) -> dict:

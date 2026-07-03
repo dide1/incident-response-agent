@@ -12,7 +12,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 SERVICE = sys.argv[1] if len(sys.argv) > 1 else "payments-service"
-BASE_URL = (sys.argv[2].rstrip("/") if len(sys.argv) > 2 else "http://localhost:8090")
+BASE_URL = (sys.argv[2].rstrip("/") if len(sys.argv) > 2 else "http://localhost:9000")
 
 BAD_COMMITS = {
     "payments-service": {
