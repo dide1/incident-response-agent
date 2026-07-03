@@ -101,13 +101,22 @@ def build_slack_blocks(alert: dict, result: dict) -> list[dict]:
 
     # ── Runbook ─────────────────────────────────────────────────────────────
     if runbook:
+        # Truncate summary to first 2 sentences so the brief stays scannable at 3am.
+        # Full procedure is in the linked runbook.
+        summary = runbook.get("summary", "")
+        sentences = summary.split(". ")
+        short_summary = ". ".join(sentences[:2]).strip()
+        if not short_summary.endswith("."):
+            short_summary += "."
+        filename = runbook.get("filename", "")
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": (
                     f":books: *Runbook: {runbook.get('title', 'Unknown')}*\n"
-                    f"{runbook.get('summary', '')}"
+                    f"{short_summary}\n"
+                    f"_Full steps: `{filename}`_"
                 ),
             },
         })

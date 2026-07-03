@@ -43,7 +43,7 @@ When given a production alert you must do ALL of the following in order:
   "runbook": {
     "filename": "<filename of top matching runbook>",
     "title": "<runbook title>",
-    "summary": "<2-3 sentence summary of the most relevant steps from the runbook>"
+    "summary": "<1-2 sentences: immediate mitigation action only — no shell commands, no multi-step procedures. Tell the on-call what to do right now.>"
   }
 }
 
