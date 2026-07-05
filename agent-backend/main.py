@@ -5,7 +5,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 import os
 import pathlib
@@ -95,6 +95,65 @@ async def _run_agent_background(alert: dict) -> None:
         logger.info("=" * 70)
     except Exception:
         logger.exception("Agent failed for alert=%s service=%s", alertname, service)
+
+
+@app.post("/webhook/github")
+async def receive_github_webhook(request: Request):
+    """
+    GitHub webhook receiver.
+    - workflow_run (completed, conclusion=failure) → run the agent as a CIFailure incident
+    - push → record commits into deploy_tracker (deploy history for the repo)
+    Verifies X-Hub-Signature-256 when GITHUB_WEBHOOK_SECRET is set.
+    """
+    import hashlib
+    import hmac
+
+    body = await request.body()
+    secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    if secret:
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    payload = json.loads(body) if body else {}
+    repo_name = payload.get("repository", {}).get("name", "unknown")
+
+    if event == "workflow_run":
+        run = payload.get("workflow_run", {})
+        if payload.get("action") == "completed" and run.get("conclusion") == "failure":
+            alert_context = {
+                "alertname": "CIFailure",
+                "service": repo_name,
+                "severity": "warning",
+                "description": (
+                    f"GitHub Actions workflow '{run.get('name')}' failed on branch "
+                    f"{run.get('head_branch')} at commit {run.get('head_sha', '')[:8]}. "
+                    f"Run ID: {run.get('id')}. URL: {run.get('html_url')}"
+                ),
+                "starts_at": run.get("run_started_at"),
+            }
+            logger.info("CI failure webhook: %s run %s", repo_name, run.get("id"))
+            asyncio.create_task(_run_agent_background(alert_context))
+            return {"status": "investigating", "run_id": run.get("id")}
+        return {"status": "ignored", "reason": f"workflow_run {payload.get('action')}/{run.get('conclusion')}"}
+
+    if event == "push":
+        commits = payload.get("commits", [])
+        for c in commits:
+            insert_deploy({
+                "sha": c["id"],
+                "service": repo_name,
+                "author": c.get("author", {}).get("email", "unknown"),
+                "commit_message": c.get("message", "").split("\n")[0],
+                "deployed_at": c.get("timestamp"),
+                "branch": payload.get("ref", "").replace("refs/heads/", ""),
+            })
+        logger.info("Push webhook: recorded %d commits for %s", len(commits), repo_name)
+        return {"status": "recorded", "commits": len(commits)}
+
+    return {"status": "ignored", "event": event}
 
 
 async def _generate_postmortem_background(alertname: str, service: str, resolved_at: str) -> None:

@@ -90,6 +90,9 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/incidents
       - RUNBOOKS_DIR=/runbooks
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPOS=${GITHUB_REPOS:-}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
     volumes:
       - ./runbooks:/runbooks:ro
     depends_on:

@@ -15,13 +15,20 @@ When given a production alert you must do ALL of the following in order:
 1. Call get_recent_deploys for the affected service (use window_minutes=90)
 2. Call get_commit_diff for every commit returned — even seemingly innocuous ones
 3. Call search_runbooks with a query combining the alert type, error signature, and service name
-4. Call query_prometheus TWICE to get real impact numbers. Use {window} as the rate()
-   duration placeholder and pass `since` = the alert's starts_at so the window matches
-   the exact incident duration (not a fixed interval that dilutes with pre-incident traffic):
-   a. Error rate fraction: rate(http_requests_total{job="<service>",status_code=~"5.."}[{window}]) / rate(http_requests_total{job="<service>"}[{window}])
-      Multiply by 100 to convert to a percentage for the impact field.
-   b. Request rate (per minute): rate(http_requests_total{job="<service>"}[{window}]) * 60
-   (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[{window}])))
+4. Gather failure evidence appropriate to the alert type:
+   - For production metric alerts (HighErrorRate, HighLatency): call query_prometheus TWICE.
+     Use {window} as the rate() duration placeholder and pass `since` = the alert's starts_at:
+     a. Error rate fraction: rate(http_requests_total{job="<service>",status_code=~"5.."}[{window}]) / rate(http_requests_total{job="<service>"}[{window}])
+        Multiply by 100 to convert to a percentage for the impact field.
+     b. Request rate (per minute): rate(http_requests_total{job="<service>"}[{window}]) * 60
+     (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[{window}])))
+   - For CI/build failure alerts (CIFailure): call get_ci_logs instead of query_prometheus.
+     Read the failed step names and log tail to extract the failure signature (test name,
+     exception, build error), then correlate it against the commit diffs. Set all impact
+     fields to null. Note: for CI failures, commits may legitimately be older than the
+     alert — the head_sha from get_ci_logs identifies which commit actually triggered the run.
+     If the logs suggest a flaky test or infrastructure issue rather than a code change,
+     say so and use low confidence rather than blaming the nearest commit.
 5. Output ONLY a JSON object — no prose before or after — in this exact shape:
 
 {

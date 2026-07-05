@@ -108,11 +108,13 @@ def insert_deploy(data: dict) -> None:
 
 
 def fetch_recent_deploys(service: str, window_minutes: int) -> list[dict]:
+    # NOTE: is_fault is deliberately excluded — it's a test-harness label and
+    # returning it would leak the answer key into the agent's context.
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT sha, service, deployed_at, author, commit_message, branch, is_fault
+                SELECT sha, service, deployed_at, author, commit_message, branch
                 FROM deploy_tracker
                 WHERE service = %s
                   AND deployed_at >= NOW() - INTERVAL '%s minutes'

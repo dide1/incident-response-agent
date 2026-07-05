@@ -69,6 +69,32 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_ci_logs",
+        "description": (
+            "Fetch the failed-job logs for a GitHub Actions CI run. Use this for "
+            "CI/build failure alerts instead of query_prometheus. Returns the "
+            "workflow name, head commit sha, branch, failed job names, failed step "
+            "names, and the tail of each failed job's log output."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Service/repo name from the alert, e.g. 'loupe'",
+                },
+                "run_id": {
+                    "type": "integer",
+                    "description": (
+                        "GitHub Actions run ID if known (from the alert description). "
+                        "Omit to use the most recent failed run."
+                    ),
+                },
+            },
+            "required": ["service"],
+        },
+    },
+    {
         "name": "query_prometheus",
         "description": (
             "Run a PromQL query against Prometheus and return the current scalar value. "
@@ -115,12 +141,25 @@ def dispatch(name: str, inputs: dict) -> str:
     logger.info("Tool call: %s(%s)", name, json.dumps(inputs))
 
     if name == "get_recent_deploys":
-        rows = fetch_recent_deploys(inputs["service"], inputs.get("window_minutes", 60))
+        from github_client import list_recent_commits, repo_for_service
+        service = inputs["service"]
+        window = inputs.get("window_minutes", 60)
+        if repo_for_service(service):
+            rows = list_recent_commits(service, window)
+        else:
+            rows = fetch_recent_deploys(service, window)
         result = rows if rows else []
 
     elif name == "get_commit_diff":
         row = fetch_commit_diff(inputs["sha"])
+        if row is None:
+            from github_client import fetch_commit_diff as gh_fetch_diff
+            row = gh_fetch_diff(inputs["sha"])
         result = row if row else {"error": f"No diff found for SHA {inputs['sha']}"}
+
+    elif name == "get_ci_logs":
+        from github_client import fetch_ci_logs
+        result = fetch_ci_logs(inputs["service"], inputs.get("run_id"))
 
     elif name == "search_runbooks":
         from embedder import embed
