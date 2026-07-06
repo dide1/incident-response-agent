@@ -56,6 +56,16 @@ def init_db():
                         CREATE INDEX IF NOT EXISTS idx_runbooks_embedding
                             ON runbooks USING hnsw (embedding vector_cosine_ops);
 
+                        CREATE TABLE IF NOT EXISTS incidents (
+                            id         SERIAL PRIMARY KEY,
+                            alertname  VARCHAR(200) NOT NULL,
+                            service    VARCHAR(100) NOT NULL,
+                            severity   VARCHAR(50),
+                            description TEXT,
+                            result     JSONB,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        );
+
                         CREATE TABLE IF NOT EXISTS postmortems (
                             id            SERIAL PRIMARY KEY,
                             alertname     VARCHAR(200) NOT NULL,
@@ -197,6 +207,48 @@ def search_runbooks_db(query_embedding: list[float], top_k: int = 3) -> list[dic
                 LIMIT %s
                 """,
                 (vec, vec, top_k),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def insert_incident(alert: dict, result: dict) -> None:
+    import json as _json
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO incidents (alertname, service, severity, description, result)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    alert.get("alertname", "unknown"),
+                    alert.get("service", "unknown"),
+                    alert.get("severity"),
+                    alert.get("description", ""),
+                    _json.dumps(result, default=str),
+                ),
+            )
+        conn.commit()
+
+
+def list_incidents(limit: int = 50) -> list[dict]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, alertname, service, severity, description, result, created_at "
+                "FROM incidents ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def list_postmortems(limit: int = 20) -> list[dict]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, alertname, service, content, created_at "
+                "FROM postmortems ORDER BY created_at DESC LIMIT %s",
+                (limit,),
             )
             return [dict(r) for r in cur.fetchall()]
 

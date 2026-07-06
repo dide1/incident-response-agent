@@ -93,6 +93,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITHUB_REPOS=${GITHUB_REPOS:-}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - GITHUB_POLL_INTERVAL=${GITHUB_POLL_INTERVAL:-120}
     volumes:
       - ./runbooks:/runbooks:ro
     depends_on:

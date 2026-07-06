@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Incident Response Agent</title>
+<style>
+  :root {
+    --bg: #faf8f4;        /* bone */
+    --panel: #ffffff;
+    --ink: #1c1917;       /* near-black warm */
+    --muted: #78716c;     /* stone */
+    --line: #e7e2da;
+    --accent: #8c4a2f;    /* burnt sienna */
+    --critical: #7f1d1d;
+    --warning: #92600a;
+    --info: #44575e;
+    --ok: #3f5c46;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 28px 40px 22px;
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  h1 { font-family: Georgia, "Times New Roman", serif; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  h1 small { color: var(--muted); font-size: 14px; font-family: inherit; font-weight: 400; margin-left: 12px; }
+  #status { color: var(--muted); font-size: 13px; }
+  nav { padding: 0 40px; border-bottom: 1px solid var(--line); display: flex; gap: 28px; }
+  nav button {
+    background: none; border: none; padding: 14px 2px; cursor: pointer;
+    font: 600 14px inherit; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav button.active { color: var(--ink); border-bottom-color: var(--accent); }
+  main { max-width: 980px; margin: 0 auto; padding: 32px 40px 80px; }
+  .empty { color: var(--muted); padding: 60px 0; text-align: center; font-family: Georgia, serif; font-style: italic; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 22px 26px; margin-bottom: 18px;
+  }
+  .card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .sev {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 3px; color: #fff;
+  }
+  .sev.critical { background: var(--critical); }
+  .sev.warning  { background: var(--warning); }
+  .sev.info     { background: var(--info); }
+  .card-head .title { font-family: Georgia, serif; font-size: 19px; font-weight: 600; }
+  .card-head .when { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .impact { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+  .impact strong { color: var(--ink); }
+
+  .commit {
+    margin-top: 14px; padding: 14px 16px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+  }
+  .commit .sha { font: 600 13px ui-monospace, Menlo, monospace; color: var(--accent); }
+  .commit .meta { color: var(--muted); font-size: 13px; }
+  .commit .msg { font-style: italic; font-family: Georgia, serif; margin-top: 2px; }
+  .commit .why { margin-top: 8px; font-size: 14px; }
+  .conf { font-size: 12px; color: var(--muted); }
+  .runbook { margin-top: 12px; font-size: 14px; }
+  .runbook .rb-title { font-weight: 600; }
+  .runbook .rb-file { font: 12px ui-monospace, Menlo, monospace; color: var(--muted); }
+
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; user-select: none; }
+  pre.toollog {
+    margin-top: 10px; padding: 14px; overflow-x: auto;
+    background: #14100e; color: #d6cfc4; border-radius: 4px;
+    font: 12px/1.5 ui-monospace, Menlo, monospace; max-height: 420px; overflow-y: auto;
+  }
+
+  .pm { font-size: 14.5px; }
+  .pm h1 { font-size: 22px; margin: 4px 0 10px; }
+  .pm h2 {
+    font-family: Georgia, serif; font-size: 17px; font-weight: 600;
+    margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line);
+  }
+  .pm p { margin: 8px 0; }
+  .pm table { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 13.5px; }
+  .pm th, .pm td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+  .pm th { background: var(--bg); }
+  .pm code { font: 13px ui-monospace, Menlo, monospace; background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+  .pm pre { background: #14100e; color: #d6cfc4; padding: 12px; border-radius: 4px; overflow-x: auto; margin: 10px 0; }
+  .pm pre code { background: none; color: inherit; padding: 0; }
+  .pm ul { padding-left: 22px; margin: 8px 0; }
+  .pm li { margin: 3px 0; }
+  .pm li.task { list-style: none; margin-left: -18px; }
+  .pm strong { font-weight: 650; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Incident Response Agent<small>autonomous triage &amp; postmortems</small></h1>
+  <span id="status">loading…</span>
+</header>
+<nav>
+  <button id="tab-incidents" class="active" onclick="show('incidents')">Incidents</button>
+  <button id="tab-postmortems" onclick="show('postmortems')">Postmortems</button>
+</nav>
+<main>
+  <div id="view-incidents"></div>
+  <div id="view-postmortems" style="display:none"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let active = 'incidents';
+
+function show(tab) {
+  active = tab;
+  for (const t of ['incidents', 'postmortems']) {
+    $('tab-' + t).classList.toggle('active', t === tab);
+    $('view-' + t).style.display = t === tab ? '' : 'none';
+  }
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+function impactLine(imp) {
+  if (!imp) return '';
+  const parts = [];
+  if (imp.error_rate_pct != null) parts.push(`<strong>${imp.error_rate_pct}%</strong> error rate`);
+  if (imp.failed_per_min != null) parts.push(`~<strong>${Math.round(imp.failed_per_min)}</strong> failed req/min`);
+  if (imp.requests_per_min != null) parts.push(`${Math.round(imp.requests_per_min)} req/min`);
+  if (imp.p99_latency_s != null) parts.push(`P99 <strong>${imp.p99_latency_s}s</strong>`);
+  return parts.length ? `<div class="impact">${parts.join(' &nbsp;·&nbsp; ')}</div>` : '';
+}
+
+function incidentCard(row) {
+  const r = row.result || {};
+  const c = r.likely_commit;
+  const rb = r.runbook;
+  const commitHtml = c ? `
+    <div class="commit">
+      <span class="sha">${esc((c.sha||'').slice(0,8))}</span>
+      <span class="meta"> · ${esc(c.author||'')} </span>
+      <span class="conf">(${esc(r.confidence||'?')} confidence)</span>
+      <div class="msg">${esc(c.message||'')}</div>
+      <div class="why">${esc(r.error_match || r.reasoning || '')}</div>
+    </div>` : `
+    <div class="commit">
+      <span class="conf">No commit blamed (${esc(r.confidence||'?')} confidence)</span>
+      <div class="why">${esc(r.reasoning||'')}</div>
+    </div>`;
+  const rbHtml = rb ? `
+    <div class="runbook">
+      <span class="rb-title">Runbook: ${esc(rb.title||'')}</span>
+      <span class="rb-file"> — ${esc(rb.filename||'')}</span><br>
+      ${esc(rb.summary||'')}
+    </div>` : '';
+  const toolLog = (r.tool_log || []).map(t =>
+    `▸ ${t.tool}(${JSON.stringify(t.input)})`).join('\n');
+  return `
+  <div class="card">
+    <div class="card-head">
+      <span class="sev ${esc(row.severity||'info')}">${esc(row.severity||'info')}</span>
+      <span class="title">${esc(row.alertname)} — ${esc(row.service)}</span>
+      <span class="when">${fmtTime(row.created_at)}</span>
+    </div>
+    ${impactLine(r.impact)}
+    ${commitHtml}
+    ${rbHtml}
+    <details><summary>agent tool calls (${(r.tool_log||[]).length})</summary>
+      <pre class="toollog">${esc(toolLog)}</pre>
+    </details>
+  </div>`;
+}
+
+/* Minimal markdown renderer: headings, bold, inline/backtick code, fenced
+   blocks, tables, lists, checkboxes. Enough for the postmortem format. */
+function md(text) {
+  const lines = String(text||'').split('\n');
+  let html = '', inCode = false, inList = false, tableBuf = [];
+
+  const flushTable = () => {
+    if (!tableBuf.length) return;
+    const rows = tableBuf.filter(l => !/^\s*\|[\s\-|:]+\|\s*$/.test(l));
+    let t = '<table>';
+    rows.forEach((l, i) => {
+      const cells = l.split('|').slice(1, -1).map(c => inline(c.trim()));
+      const tag = i === 0 ? 'th' : 'td';
+      t += '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
+    });
+    html += t + '</table>'; tableBuf = [];
+  };
+  const inline = (s) => esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+  for (const raw of lines) {
+    if (raw.startsWith('```')) {
+      flushTable();
+      html += inCode ? '</code></pre>' : '<pre><code>';
+      inCode = !inCode; continue;
+    }
+    if (inCode) { html += esc(raw) + '\n'; continue; }
+    if (/^\s*\|/.test(raw)) { tableBuf.push(raw); continue; }
+    flushTable();
+    if (inList && !/^\s*- /.test(raw)) { html += '</ul>'; inList = false; }
+
+    if (raw.startsWith('## '))      html += `<h2>${inline(raw.slice(3))}</h2>`;
+    else if (raw.startsWith('# '))  html += `<h1>${inline(raw.slice(2))}</h1>`;
+    else if (/^\s*- \[[ x]\]/.test(raw)) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      const checked = /\[x\]/i.test(raw);
+      html += `<li class="task"><input type="checkbox" disabled ${checked?'checked':''}> ${inline(raw.replace(/^\s*- \[[ x]\]\s*/i,''))}</li>`;
+    }
+    else if (/^\s*- /.test(raw)) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += `<li>${inline(raw.replace(/^\s*- /,''))}</li>`;
+    }
+    else if (raw.trim() === '---' || raw.trim() === '') { /* skip */ }
+    else html += `<p>${inline(raw)}</p>`;
+  }
+  if (inList) html += '</ul>';
+  flushTable();
+  return html;
+}
+
+function pmCard(row) {
+  return `
+  <div class="card">
+    <div class="card-head">
+      <span class="sev ok" style="background:var(--ok)">resolved</span>
+      <span class="title">${esc(row.alertname)} — ${esc(row.service)}</span>
+      <span class="when">${fmtTime(row.created_at)}</span>
+    </div>
+    <div class="pm">${md(row.content)}</div>
+  </div>`;
+}
+
+async function refresh() {
+  try {
+    const [inc, pms] = await Promise.all([
+      fetch('/incidents').then(r => r.json()),
+      fetch('/postmortems').then(r => r.json()),
+    ]);
+    $('view-incidents').innerHTML = inc.length
+      ? inc.map(incidentCard).join('')
+      : '<div class="empty">No incidents yet. Break something.</div>';
+    $('view-postmortems').innerHTML = pms.length
+      ? pms.map(pmCard).join('')
+      : '<div class="empty">No postmortems yet — they appear when incidents resolve.</div>';
+    $('status').textContent =
+      `${inc.length} incidents · ${pms.length} postmortems · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $('status').textContent = 'connection lost — retrying…';
+  }
+}
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

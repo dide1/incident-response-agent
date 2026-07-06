@@ -6,14 +6,16 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 import os
 import pathlib
 
 from agent import run_agent
 from db import (
-    clear_deploys, init_db, insert_deploy, insert_postmortem,
-    get_latest_postmortem, list_deploys, list_runbooks_db, upsert_runbook,
+    clear_deploys, init_db, insert_deploy, insert_incident, insert_postmortem,
+    get_latest_postmortem, list_deploys, list_incidents, list_postmortems,
+    list_runbooks_db, upsert_runbook,
 )
 
 logging.basicConfig(
@@ -27,10 +29,45 @@ logger = logging.getLogger(__name__)
 _recent_analyses: deque = deque(maxlen=20)
 
 
+def _ingest_runbooks_sync() -> list[dict]:
+    """Read, embed, and upsert every runbook. Shared by startup and the admin endpoint."""
+    from embedder import embed
+
+    runbooks_dir = pathlib.Path(os.getenv("RUNBOOKS_DIR", "/runbooks"))
+    if not runbooks_dir.exists():
+        raise FileNotFoundError(f"Runbooks directory not found: {runbooks_dir}")
+
+    ingested = []
+    for md_file in sorted(runbooks_dir.glob("*.md")):
+        content = md_file.read_text(encoding="utf-8")
+        title_line = next((l for l in content.splitlines() if l.startswith("# ")), None)
+        title = title_line[2:].strip() if title_line else md_file.stem
+        embedding = embed(f"{title}\n\n{content}")
+        upsert_runbook(md_file.name, title, content, embedding)
+        ingested.append({"filename": md_file.name, "title": title})
+    return ingested
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+
+    # Auto-ingest runbooks so `docker compose up` is the whole setup
+    loop = asyncio.get_event_loop()
+    try:
+        ingested = await loop.run_in_executor(None, _ingest_runbooks_sync)
+        logger.info("Startup runbook ingestion: %d runbooks", len(ingested))
+    except Exception as exc:
+        logger.warning("Startup runbook ingestion skipped: %s", exc)
+
+    # CI poller (no-op when GITHUB_REPOS is unset)
+    from ci_poller import poll_github_loop
+    poller = asyncio.create_task(
+        poll_github_loop(_run_agent_background, _generate_postmortem_background)
+    )
+
     yield
+    poller.cancel()
 
 
 app = FastAPI(title="Incident Response Agent", lifespan=lifespan)
@@ -88,6 +125,11 @@ async def _run_agent_background(alert: dict) -> None:
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
         _recent_analyses.append(entry)
+
+        try:
+            insert_incident(alert, result)
+        except Exception:
+            logger.exception("Failed to persist incident to DB")
 
         logger.info("=" * 70)
         logger.info("AGENT ANALYSIS  alert=%s  service=%s", alertname, service)
@@ -221,28 +263,12 @@ async def admin_clear_deploys():
 
 @app.post("/admin/ingest-runbooks", status_code=200)
 async def ingest_runbooks():
-    """
-    Read all .md files from /runbooks, embed them, and upsert into pgvector.
-    Safe to call multiple times (upserts on filename).
-    """
-    from embedder import embed
-
-    runbooks_dir = pathlib.Path(os.getenv("RUNBOOKS_DIR", "/runbooks"))
-    if not runbooks_dir.exists():
-        raise HTTPException(status_code=500, detail=f"Runbooks directory not found: {runbooks_dir}")
-
-    ingested = []
-    for md_file in sorted(runbooks_dir.glob("*.md")):
-        content = md_file.read_text(encoding="utf-8")
-        title_line = next((l for l in content.splitlines() if l.startswith("# ")), None)
-        title = title_line[2:].strip() if title_line else md_file.stem
-
-        # Embed title + content together so queries on either surface the runbook
-        embedding = embed(f"{title}\n\n{content}")
-        upsert_runbook(md_file.name, title, content, embedding)
-        ingested.append({"filename": md_file.name, "title": title})
-        logger.info("Ingested runbook: %s", md_file.name)
-
+    """Re-embed and upsert all runbooks. Also runs automatically at startup."""
+    try:
+        loop = asyncio.get_event_loop()
+        ingested = await loop.run_in_executor(None, _ingest_runbooks_sync)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     logger.info("Runbook ingestion complete: %d files", len(ingested))
     return {"ingested": ingested, "count": len(ingested)}
 
@@ -263,6 +289,27 @@ async def search_runbooks_endpoint(body: dict):
     top_k = int(body.get("top_k", 3))
     vec = embed(query)
     return search_runbooks_db(vec, top_k=top_k)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    """Serve the incident dashboard."""
+    page = pathlib.Path(__file__).parent / "static" / "index.html"
+    if not page.exists():
+        return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
+    return HTMLResponse(page.read_text(encoding="utf-8"))
+
+
+@app.get("/incidents")
+async def get_incidents(limit: int = 50):
+    """Persisted incident history, newest first."""
+    return list_incidents(limit=limit)
+
+
+@app.get("/postmortems")
+async def get_postmortems(limit: int = 20):
+    """Persisted postmortems, newest first."""
+    return list_postmortems(limit=limit)
 
 
 @app.get("/postmortems/latest")
