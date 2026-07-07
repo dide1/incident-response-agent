@@ -4,7 +4,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -182,8 +182,8 @@ def post_slack_postmortem(incident: dict, postmortem_md: str, resolved_at: str) 
 
     # First non-heading paragraph of the postmortem as a preview
     preview_lines = [
-        l for l in postmortem_md.splitlines()
-        if l.strip() and not l.startswith("#") and not l.startswith("**")
+        ln for ln in postmortem_md.splitlines()
+        if ln.strip() and not ln.startswith("#") and not ln.startswith("**")
     ]
     preview = preview_lines[0][:200] if preview_lines else ""
 

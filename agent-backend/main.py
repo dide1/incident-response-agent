@@ -40,7 +40,7 @@ def _ingest_runbooks_sync() -> list[dict]:
     ingested = []
     for md_file in sorted(runbooks_dir.glob("*.md")):
         content = md_file.read_text(encoding="utf-8")
-        title_line = next((l for l in content.splitlines() if l.startswith("# ")), None)
+        title_line = next((ln for ln in content.splitlines() if ln.startswith("# ")), None)
         title = title_line[2:].strip() if title_line else md_file.stem
         embedding = embed(f"{title}\n\n{content}")
         upsert_runbook(md_file.name, title, content, embedding)

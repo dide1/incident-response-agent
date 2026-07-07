@@ -1,7 +1,7 @@
 """Generate Markdown postmortems from completed incident analysis."""
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 import anthropic
 

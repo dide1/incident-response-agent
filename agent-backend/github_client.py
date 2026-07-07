@@ -71,7 +71,7 @@ def list_recent_commits(service: str, window_minutes: int, branch: str | None = 
     if not repo:
         return []
 
-    branch_param = f"&sha={urllib.parse.quote(branch)}" if branch else ""
+    branch_param = f"&sha={urllib.parse.quote(branch, safe='')}" if branch else ""
     since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
