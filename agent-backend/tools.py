@@ -25,6 +25,15 @@ TOOL_DEFINITIONS = [
                     "description": "How many minutes before now to look back (default 60)",
                     "default": 60,
                 },
+                "branch": {
+                    "type": "string",
+                    "description": (
+                        "Git branch to inspect (GitHub-backed services only). "
+                        "IMPORTANT for CI failures: the failure happens on a specific "
+                        "branch — pass it, or you will only see default-branch commits "
+                        "and miss the actual culprit."
+                    ),
+                },
             },
             "required": ["service"],
         },
@@ -145,7 +154,7 @@ def dispatch(name: str, inputs: dict) -> str:
         service = inputs["service"]
         window = inputs.get("window_minutes", 60)
         if repo_for_service(service):
-            rows = list_recent_commits(service, window)
+            rows = list_recent_commits(service, window, branch=inputs.get("branch"))
         else:
             rows = fetch_recent_deploys(service, window)
         result = rows if rows else []

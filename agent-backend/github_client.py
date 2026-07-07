@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -53,10 +54,14 @@ def _get_json(path: str):
     return json.loads(_request(path))
 
 
-def list_recent_commits(service: str, window_minutes: int) -> list[dict]:
+def list_recent_commits(service: str, window_minutes: int, branch: str | None = None) -> list[dict]:
     """
     Real commits from the configured repo, shaped like deploy_tracker rows so the
     agent's get_recent_deploys tool interface is unchanged.
+
+    branch: the GitHub commits API defaults to the default branch, which silently
+    hides commits on feature branches — the exact commits CI failures usually
+    point at. Passing the branch from the alert scopes the suspect pool correctly.
 
     Falls back to the last 5 commits when the window is empty (real repos often
     have no pushes in the last 90 minutes) — deployed_at stays honest so the
@@ -66,16 +71,17 @@ def list_recent_commits(service: str, window_minutes: int) -> list[dict]:
     if not repo:
         return []
 
+    branch_param = f"&sha={urllib.parse.quote(branch)}" if branch else ""
     since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     try:
-        commits = _get_json(f"/repos/{repo}/commits?since={since}&per_page=20")
+        commits = _get_json(f"/repos/{repo}/commits?since={since}&per_page=20{branch_param}")
         if not commits:
-            commits = _get_json(f"/repos/{repo}/commits?per_page=5")
+            commits = _get_json(f"/repos/{repo}/commits?per_page=5{branch_param}")
             logger.info(
-                "No commits in %dm window for %s — returning last %d commits",
-                window_minutes, repo, len(commits),
+                "No commits in %dm window for %s (branch=%s) — returning last %d commits",
+                window_minutes, repo, branch or "default", len(commits),
             )
     except urllib.error.HTTPError as exc:
         logger.error("GitHub commits fetch failed for %s: %s", repo, exc)
@@ -93,7 +99,7 @@ def list_recent_commits(service: str, window_minutes: int) -> list[dict]:
             "deployed_at": author.get("date", ""),
             "author": author.get("email", author.get("name", "unknown")),
             "commit_message": commit.get("message", "").split("\n")[0],
-            "branch": "default",
+            "branch": branch or "default",
         })
     return rows
 

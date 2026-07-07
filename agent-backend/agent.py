@@ -22,7 +22,10 @@ When given a production alert you must do ALL of the following in order:
         Multiply by 100 to convert to a percentage for the impact field.
      b. Request rate (per minute): rate(http_requests_total{job="<service>"}[{window}]) * 60
      (For HighLatency alerts instead query: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job="<service>"}[{window}])))
-   - For CI/build failure alerts (CIFailure): call get_ci_logs instead of query_prometheus.
+   - For CI/build failure alerts (CIFailure): the alert description names the branch the
+     failure occurred on — pass it as the `branch` parameter to get_recent_deploys, or you
+     will only see default-branch commits and miss the actual culprit.
+     Call get_ci_logs instead of query_prometheus.
      Read the failed step names and log tail to extract the failure signature (test name,
      exception, build error), then correlate it against the commit diffs. Set all impact
      fields to null. Note: for CI failures, commits may legitimately be older than the
