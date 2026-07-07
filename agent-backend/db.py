@@ -65,6 +65,15 @@ def init_db():
                             result     JSONB,
                             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                         );
+                        -- state machine: investigating -> brief_posted -> resolved (or failed)
+                        ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
+                            status VARCHAR(30) NOT NULL DEFAULT 'investigating';
+                        ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
+                            brief_posted_at TIMESTAMPTZ;
+                        ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
+                            resolved_at TIMESTAMPTZ;
+                        ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
+                            postmortem_id INTEGER;
 
                         CREATE TABLE IF NOT EXISTS postmortems (
                             id            SERIAL PRIMARY KEY,
@@ -211,31 +220,87 @@ def search_runbooks_db(query_embedding: list[float], top_k: int = 3) -> list[dic
             return [dict(r) for r in cur.fetchall()]
 
 
-def insert_incident(alert: dict, result: dict) -> None:
-    import json as _json
+def create_incident(alert: dict) -> int:
+    """Insert a new incident in 'investigating' state; returns its id."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO incidents (alertname, service, severity, description, result)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO incidents (alertname, service, severity, description, status)
+                VALUES (%s, %s, %s, %s, 'investigating')
+                RETURNING id
                 """,
                 (
                     alert.get("alertname", "unknown"),
                     alert.get("service", "unknown"),
                     alert.get("severity"),
                     alert.get("description", ""),
-                    _json.dumps(result, default=str),
                 ),
             )
+            incident_id = cur.fetchone()["id"]
         conn.commit()
+    return incident_id
+
+
+def complete_incident(incident_id: int, result: dict) -> None:
+    """Attach the agent's analysis and transition to 'brief_posted'."""
+    import json as _json
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE incidents
+                SET result = %s, status = 'brief_posted', brief_posted_at = NOW()
+                WHERE id = %s
+                """,
+                (_json.dumps(result, default=str), incident_id),
+            )
+        conn.commit()
+
+
+def fail_incident(incident_id: int) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE incidents SET status = 'failed' WHERE id = %s", (incident_id,)
+            )
+        conn.commit()
+
+
+def resolve_incident(
+    alertname: str, service: str, resolved_at: str, postmortem_id: int | None
+) -> int | None:
+    """
+    Transition the most recent unresolved incident for this alert+service to
+    'resolved' and link its postmortem. Returns the incident id, or None if
+    there was nothing to resolve.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE incidents
+                SET status = 'resolved', resolved_at = %s::timestamptz, postmortem_id = %s
+                WHERE id = (
+                    SELECT id FROM incidents
+                    WHERE alertname = %s AND service = %s AND status != 'resolved'
+                    ORDER BY created_at DESC LIMIT 1
+                )
+                RETURNING id
+                """,
+                (resolved_at, postmortem_id, alertname, service),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row["id"] if row else None
 
 
 def list_incidents(limit: int = 50) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, alertname, service, severity, description, result, created_at "
+                "SELECT id, alertname, service, severity, description, result, "
+                "       status, created_at, brief_posted_at, resolved_at, postmortem_id "
                 "FROM incidents ORDER BY created_at DESC LIMIT %s",
                 (limit,),
             )
@@ -253,7 +318,7 @@ def list_postmortems(limit: int = 20) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
-def insert_postmortem(alertname: str, service: str, content: str, incident_data: dict) -> None:
+def insert_postmortem(alertname: str, service: str, content: str, incident_data: dict) -> int:
     import json as _json
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -261,10 +326,13 @@ def insert_postmortem(alertname: str, service: str, content: str, incident_data:
                 """
                 INSERT INTO postmortems (alertname, service, content, incident_data)
                 VALUES (%s, %s, %s, %s)
+                RETURNING id
                 """,
                 (alertname, service, content, _json.dumps(incident_data, default=str)),
             )
+            pm_id = cur.fetchone()["id"]
         conn.commit()
+    return pm_id
 
 
 def get_latest_postmortem() -> dict | None:

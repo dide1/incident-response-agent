@@ -52,6 +52,14 @@
   .sev.critical { background: var(--critical); }
   .sev.warning  { background: var(--warning); }
   .sev.info     { background: var(--info); }
+  .st {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 3px; border: 1px solid;
+  }
+  .st.investigating   { color: var(--warning); border-color: var(--warning); }
+  .st.brief_posted    { color: var(--muted); border-color: var(--line); }
+  .st.resolved        { color: var(--ok); border-color: var(--ok); }
+  .st.failed          { color: var(--critical); border-color: var(--critical); }
   .card-head .title { font-family: Georgia, serif; font-size: 19px; font-weight: 600; }
   .card-head .when { color: var(--muted); font-size: 13px; margin-left: auto; }
   .impact { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
@@ -165,19 +173,25 @@ function incidentCard(row) {
     </div>` : '';
   const toolLog = (r.tool_log || []).map(t =>
     `▸ ${t.tool}(${JSON.stringify(t.input)})`).join('\n');
+  const status = row.status || 'brief_posted';
+  const statusLabel = status.replace('_', ' ');
+  const when = status === 'resolved' && row.resolved_at
+    ? `resolved ${fmtTime(row.resolved_at)}`
+    : fmtTime(row.created_at);
   return `
   <div class="card">
     <div class="card-head">
       <span class="sev ${esc(row.severity||'info')}">${esc(row.severity||'info')}</span>
       <span class="title">${esc(row.alertname)} — ${esc(row.service)}</span>
-      <span class="when">${fmtTime(row.created_at)}</span>
+      <span class="st ${esc(status)}">${esc(statusLabel)}</span>
+      <span class="when">${esc(when)}</span>
     </div>
-    ${impactLine(r.impact)}
-    ${commitHtml}
-    ${rbHtml}
+    ${status === 'investigating'
+      ? '<div class="impact" style="font-style:italic">agent investigating…</div>'
+      : impactLine(r.impact) + commitHtml + rbHtml + `
     <details><summary>agent tool calls (${(r.tool_log||[]).length})</summary>
       <pre class="toollog">${esc(toolLog)}</pre>
-    </details>
+    </details>`}
   </div>`;
 }
 

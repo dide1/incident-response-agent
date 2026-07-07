@@ -13,9 +13,10 @@ import pathlib
 
 from agent import run_agent
 from db import (
-    clear_deploys, init_db, insert_deploy, insert_incident, insert_postmortem,
-    get_latest_postmortem, list_deploys, list_incidents, list_postmortems,
-    list_runbooks_db, upsert_runbook,
+    clear_deploys, complete_incident, create_incident, fail_incident, init_db,
+    insert_deploy, insert_postmortem, get_latest_postmortem, list_deploys,
+    list_incidents, list_postmortems, list_runbooks_db, resolve_incident,
+    upsert_runbook,
 )
 
 logging.basicConfig(
@@ -110,6 +111,13 @@ async def _run_agent_background(alert: dict) -> None:
     service = alert.get("service", "unknown")
     alertname = alert.get("alertname", "unknown")
     logger.info("Agent starting for %s on %s", alertname, service)
+
+    incident_id = None
+    try:
+        incident_id = create_incident(alert)  # status: investigating
+    except Exception:
+        logger.exception("Failed to create incident row")
+
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, run_agent, alert)
@@ -126,10 +134,11 @@ async def _run_agent_background(alert: dict) -> None:
         }
         _recent_analyses.append(entry)
 
-        try:
-            insert_incident(alert, result)
-        except Exception:
-            logger.exception("Failed to persist incident to DB")
+        if incident_id is not None:
+            try:
+                complete_incident(incident_id, result)  # status: brief_posted
+            except Exception:
+                logger.exception("Failed to persist incident result")
 
         logger.info("=" * 70)
         logger.info("AGENT ANALYSIS  alert=%s  service=%s", alertname, service)
@@ -137,6 +146,11 @@ async def _run_agent_background(alert: dict) -> None:
         logger.info("=" * 70)
     except Exception:
         logger.exception("Agent failed for alert=%s service=%s", alertname, service)
+        if incident_id is not None:
+            try:
+                fail_incident(incident_id)  # status: failed
+            except Exception:
+                logger.exception("Failed to mark incident failed")
 
 
 @app.post("/webhook/github")
@@ -222,7 +236,12 @@ async def _generate_postmortem_background(alertname: str, service: str, resolved
     try:
         loop = asyncio.get_event_loop()
         content = await loop.run_in_executor(None, generate_postmortem, incident, resolved_at)
-        insert_postmortem(alertname, service, content, incident)
+        pm_id = insert_postmortem(alertname, service, content, incident)
+        resolved_id = resolve_incident(alertname, service, resolved_at, pm_id)
+        if resolved_id:
+            logger.info("Incident %d resolved (postmortem %d)", resolved_id, pm_id)
+        else:
+            logger.warning("No open incident row matched %s/%s to resolve", alertname, service)
         await loop.run_in_executor(None, post_slack_postmortem, incident, content, resolved_at)
         logger.info("Postmortem stored and posted for %s/%s", alertname, service)
     except Exception:
