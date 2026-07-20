@@ -56,6 +56,24 @@ def init_db():
                         CREATE INDEX IF NOT EXISTS idx_runbooks_embedding
                             ON runbooks USING hnsw (embedding vector_cosine_ops);
 
+                        CREATE TABLE IF NOT EXISTS users (
+                            id           SERIAL PRIMARY KEY,
+                            github_id    INTEGER      NOT NULL UNIQUE,
+                            username     VARCHAR(100) NOT NULL,
+                            access_token TEXT         NOT NULL,
+                            created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                        );
+
+                        CREATE TABLE IF NOT EXISTS repos (
+                            id             SERIAL PRIMARY KEY,
+                            user_id        INTEGER      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                            owner          VARCHAR(100) NOT NULL,
+                            repo           VARCHAR(100) NOT NULL,
+                            webhook_secret VARCHAR(100) NOT NULL DEFAULT '',
+                            created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                            UNIQUE(user_id, owner, repo)
+                        );
+
                         CREATE TABLE IF NOT EXISTS incidents (
                             id         SERIAL PRIMARY KEY,
                             alertname  VARCHAR(200) NOT NULL,
@@ -74,6 +92,8 @@ def init_db():
                             resolved_at TIMESTAMPTZ;
                         ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
                             postmortem_id INTEGER;
+                        ALTER TABLE incidents ADD COLUMN IF NOT EXISTS
+                            user_id INTEGER REFERENCES users(id);
 
                         CREATE TABLE IF NOT EXISTS postmortems (
                             id            SERIAL PRIMARY KEY,
@@ -83,6 +103,8 @@ def init_db():
                             created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
                             incident_data JSONB
                         );
+                        ALTER TABLE postmortems ADD COLUMN IF NOT EXISTS
+                            user_id INTEGER REFERENCES users(id);
                     """)
                 conn.commit()
             logger.info("Database initialized")
@@ -220,14 +242,14 @@ def search_runbooks_db(query_embedding: list[float], top_k: int = 3) -> list[dic
             return [dict(r) for r in cur.fetchall()]
 
 
-def create_incident(alert: dict) -> int:
+def create_incident(alert: dict, user_id: int | None = None) -> int:
     """Insert a new incident in 'investigating' state; returns its id."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO incidents (alertname, service, severity, description, status)
-                VALUES (%s, %s, %s, %s, 'investigating')
+                INSERT INTO incidents (alertname, service, severity, description, status, user_id)
+                VALUES (%s, %s, %s, %s, 'investigating', %s)
                 RETURNING id
                 """,
                 (
@@ -235,6 +257,7 @@ def create_incident(alert: dict) -> int:
                     alert.get("service", "unknown"),
                     alert.get("severity"),
                     alert.get("description", ""),
+                    user_id,
                 ),
             )
             incident_id = cur.fetchone()["id"]
@@ -295,40 +318,58 @@ def resolve_incident(
     return row["id"] if row else None
 
 
-def list_incidents(limit: int = 50) -> list[dict]:
+def list_incidents(user_id: int | None = None, limit: int = 50) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, alertname, service, severity, description, result, "
-                "       status, created_at, brief_posted_at, resolved_at, postmortem_id "
-                "FROM incidents ORDER BY created_at DESC LIMIT %s",
-                (limit,),
-            )
+            if user_id is not None:
+                cur.execute(
+                    "SELECT id, alertname, service, severity, description, result, "
+                    "       status, created_at, brief_posted_at, resolved_at, postmortem_id "
+                    "FROM incidents WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                    (user_id, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, alertname, service, severity, description, result, "
+                    "       status, created_at, brief_posted_at, resolved_at, postmortem_id "
+                    "FROM incidents ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
             return [dict(r) for r in cur.fetchall()]
 
 
-def list_postmortems(limit: int = 20) -> list[dict]:
+def list_postmortems(user_id: int | None = None, limit: int = 20) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, alertname, service, content, created_at "
-                "FROM postmortems ORDER BY created_at DESC LIMIT %s",
-                (limit,),
-            )
+            if user_id is not None:
+                cur.execute(
+                    "SELECT id, alertname, service, content, created_at "
+                    "FROM postmortems WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                    (user_id, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, alertname, service, content, created_at "
+                    "FROM postmortems ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
             return [dict(r) for r in cur.fetchall()]
 
 
-def insert_postmortem(alertname: str, service: str, content: str, incident_data: dict) -> int:
+def insert_postmortem(
+    alertname: str, service: str, content: str, incident_data: dict,
+    user_id: int | None = None,
+) -> int:
     import json as _json
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO postmortems (alertname, service, content, incident_data)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO postmortems (alertname, service, content, incident_data, user_id)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (alertname, service, content, _json.dumps(incident_data, default=str)),
+                (alertname, service, content, _json.dumps(incident_data, default=str), user_id),
             )
             pm_id = cur.fetchone()["id"]
         conn.commit()
@@ -349,4 +390,106 @@ def list_runbooks_db() -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT filename, title FROM runbooks ORDER BY filename")
+            return [dict(r) for r in cur.fetchall()]
+
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+def get_or_create_user(github_id: int, username: str, access_token: str) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (github_id, username, access_token)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (github_id) DO UPDATE
+                    SET username = EXCLUDED.username,
+                        access_token = EXCLUDED.access_token
+                RETURNING id, github_id, username, created_at
+                """,
+                (github_id, username, access_token),
+            )
+            row = dict(cur.fetchone())
+        conn.commit()
+    return row
+
+
+def get_user_by_id(user_id: int) -> dict | None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, github_id, username FROM users WHERE id = %s", (user_id,)
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
+
+
+# ── Repos ─────────────────────────────────────────────────────────────────────
+
+def add_repo(user_id: int, owner: str, repo: str, webhook_secret: str) -> dict:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO repos (user_id, owner, repo, webhook_secret)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, owner, repo) DO UPDATE
+                    SET webhook_secret = EXCLUDED.webhook_secret
+                RETURNING id, user_id, owner, repo, created_at
+                """,
+                (user_id, owner, repo, webhook_secret),
+            )
+            row = dict(cur.fetchone())
+        conn.commit()
+    return row
+
+
+def list_user_repos(user_id: int) -> list[dict]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, owner, repo, webhook_secret, created_at "
+                "FROM repos WHERE user_id = %s ORDER BY created_at",
+                (user_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def remove_repo(user_id: int, repo_id: int) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM repos WHERE id = %s AND user_id = %s", (repo_id, user_id)
+            )
+        conn.commit()
+
+
+def get_repo_by_full_name(owner: str, repo: str) -> dict | None:
+    """Look up a repo + its owner's credentials. Used for webhook routing."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.user_id, r.owner, r.repo, r.webhook_secret,
+                       u.username, u.access_token
+                FROM repos r JOIN users u ON r.user_id = u.id
+                WHERE r.owner = %s AND r.repo = %s
+                """,
+                (owner, repo),
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def get_all_repos_with_token() -> list[dict]:
+    """Returns all repos joined with their owner's token. Used by CI poller."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.user_id, r.owner, r.repo, u.access_token
+                FROM repos r JOIN users u ON r.user_id = u.id
+                ORDER BY r.created_at
+                """
+            )
             return [dict(r) for r in cur.fetchall()]

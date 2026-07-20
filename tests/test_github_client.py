@@ -36,7 +36,7 @@ class TestListRecentCommits:
         monkeypatch.setenv("GITHUB_REPOS", "dide1/loupe")
         paths = []
 
-        def fake_get_json(path):
+        def fake_get_json(path, token=None):
             paths.append(path)
             return [_fake_commit("a" * 40)]
 
@@ -48,7 +48,7 @@ class TestListRecentCommits:
         monkeypatch.setenv("GITHUB_REPOS", "dide1/loupe")
         paths = []
 
-        def fake_get_json(path):
+        def fake_get_json(path, token=None):
             paths.append(path)
             return [_fake_commit("a" * 40)]
 
@@ -60,7 +60,7 @@ class TestListRecentCommits:
         monkeypatch.setenv("GITHUB_REPOS", "dide1/loupe")
         monkeypatch.setattr(
             gh, "_get_json",
-            lambda p: [_fake_commit("b" * 40, message="feat: x\n\nlong body")],
+            lambda p, token=None: [_fake_commit("b" * 40, message="feat: x\n\nlong body")],
         )
         rows = gh.list_recent_commits("loupe", 90)
         assert rows[0]["sha"] == "b" * 40

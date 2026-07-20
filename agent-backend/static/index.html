@@ -26,9 +26,15 @@
     border-bottom: 1px solid var(--line);
     padding: 28px 40px 22px;
     display: flex; align-items: baseline; justify-content: space-between;
+    flex-wrap: wrap; gap: 8px;
   }
   h1 { font-family: Georgia, "Times New Roman", serif; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
   h1 small { color: var(--muted); font-size: 14px; font-family: inherit; font-weight: 400; margin-left: 12px; }
+  .header-right { display: flex; align-items: center; gap: 16px; font-size: 13px; }
+  #user-info { color: var(--muted); }
+  #user-info strong { color: var(--ink); }
+  a.signout { color: var(--muted); text-decoration: none; }
+  a.signout:hover { color: var(--accent); }
   #status { color: var(--muted); font-size: 13px; }
   nav { padding: 0 40px; border-bottom: 1px solid var(--line); display: flex; gap: 28px; }
   nav button {
@@ -103,33 +109,85 @@
   .pm li { margin: 3px 0; }
   .pm li.task { list-style: none; margin-left: -18px; }
   .pm strong { font-weight: 650; }
+
+  /* Repos tab */
+  .repo-list { margin-bottom: 32px; }
+  .repo-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; margin-bottom: 10px;
+  }
+  .repo-name { font: 600 15px ui-monospace, Menlo, monospace; }
+  .repo-meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .btn-remove {
+    background: none; border: 1px solid var(--line); padding: 5px 12px;
+    border-radius: 4px; cursor: pointer; font: 13px inherit; color: var(--muted);
+  }
+  .btn-remove:hover { border-color: var(--critical); color: var(--critical); }
+  .add-repo-form { display: flex; gap: 10px; margin-bottom: 32px; flex-wrap: wrap; }
+  .add-repo-form input {
+    flex: 1; min-width: 220px; padding: 9px 12px; border: 1px solid var(--line);
+    border-radius: 4px; font: 15px inherit; background: var(--panel); color: var(--ink);
+  }
+  .add-repo-form input:focus { outline: none; border-color: var(--accent); }
+  .btn-primary {
+    padding: 9px 20px; background: var(--accent); color: #fff;
+    border: none; border-radius: 4px; cursor: pointer; font: 600 14px inherit;
+  }
+  .btn-primary:hover { opacity: 0.88; }
+  .webhook-box {
+    background: #14100e; color: #d6cfc4; padding: 18px 20px; border-radius: 6px;
+    margin-bottom: 18px; font-size: 13.5px;
+  }
+  .webhook-box h3 { color: #e5dfd6; font-size: 15px; margin-bottom: 14px; }
+  .wh-row { display: flex; gap: 12px; align-items: center; margin: 8px 0; }
+  .wh-label { color: #78716c; min-width: 100px; font-size: 12px; }
+  .wh-val { font: 13px ui-monospace, Menlo, monospace; color: #d6cfc4; word-break: break-all; }
+  .section-title {
+    font-family: Georgia, serif; font-size: 18px; font-weight: 600;
+    margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+  .onboarding-note {
+    background: #fffbf5; border: 1px solid #e7d9c4; border-radius: 6px;
+    padding: 18px 22px; margin-bottom: 28px; color: var(--muted); font-size: 14px;
+    line-height: 1.65;
+  }
+  .onboarding-note strong { color: var(--ink); }
 </style>
 </head>
 <body>
 <header>
   <h1>Incident Response Agent<small>autonomous triage &amp; postmortems</small></h1>
-  <span id="status">loading…</span>
-  <a href="/auth/logout" style="font-size:13px;color:var(--muted);text-decoration:none;">sign out</a>
+  <div class="header-right">
+    <span id="user-info"></span>
+    <span id="status">loading…</span>
+    <a href="/auth/logout" class="signout">sign out</a>
+  </div>
 </header>
 <nav>
   <button id="tab-incidents" class="active" onclick="show('incidents')">Incidents</button>
   <button id="tab-postmortems" onclick="show('postmortems')">Postmortems</button>
+  <button id="tab-repos" onclick="show('repos')">Repos</button>
 </nav>
 <main>
   <div id="view-incidents"></div>
   <div id="view-postmortems" style="display:none"></div>
+  <div id="view-repos" style="display:none"></div>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let active = 'incidents';
+let _me = null;
+let _pendingWebhook = null;
 
 function show(tab) {
   active = tab;
-  for (const t of ['incidents', 'postmortems']) {
+  for (const t of ['incidents', 'postmortems', 'repos']) {
     $('tab-' + t).classList.toggle('active', t === tab);
     $('view-' + t).style.display = t === tab ? '' : 'none';
   }
+  if (tab === 'repos' && _me) renderRepos(_me.repos);
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -196,8 +254,7 @@ function incidentCard(row) {
   </div>`;
 }
 
-/* Minimal markdown renderer: headings, bold, inline/backtick code, fenced
-   blocks, tables, lists, checkboxes. Enough for the postmortem format. */
+/* Minimal markdown renderer */
 function md(text) {
   const lines = String(text||'').split('\n');
   let html = '', inCode = false, inList = false, tableBuf = [];
@@ -259,6 +316,113 @@ function pmCard(row) {
   </div>`;
 }
 
+function renderRepos(repos) {
+  const el = $('view-repos');
+  let html = '';
+
+  if (_pendingWebhook) {
+    const wh = _pendingWebhook;
+    html += `
+    <div class="webhook-box">
+      <h3>Webhook setup for <strong>${esc(wh.owner)}/${esc(wh.repo)}</strong></h3>
+      <p style="color:#a09080;margin-bottom:14px;font-size:13px">
+        Go to <strong>GitHub → repo → Settings → Webhooks → Add webhook</strong> and enter:
+      </p>
+      <div class="wh-row"><span class="wh-label">Payload URL</span><span class="wh-val">${esc(wh.webhook_url)}</span></div>
+      <div class="wh-row"><span class="wh-label">Content type</span><span class="wh-val">application/json</span></div>
+      <div class="wh-row"><span class="wh-label">Secret</span><span class="wh-val">${esc(wh.webhook_secret)}</span></div>
+      <div class="wh-row"><span class="wh-label">Events</span><span class="wh-val">Workflow runs, Pushes</span></div>
+      <div style="margin-top:14px">
+        <button class="btn-primary" onclick="_pendingWebhook=null;renderRepos(_me.repos)">Done</button>
+      </div>
+    </div>`;
+  }
+
+  html += `<div class="section-title">Connected Repos</div>`;
+
+  if (!repos || repos.length === 0) {
+    html += `
+    <div class="onboarding-note">
+      <strong>No repos connected yet.</strong><br>
+      Connect a GitHub repo and the agent will monitor its CI runs, blame failing commits,
+      and generate postmortems automatically. You'll set up a GitHub webhook in about 60 seconds.
+    </div>`;
+  } else {
+    html += '<div class="repo-list">';
+    for (const r of repos) {
+      html += `
+      <div class="repo-row">
+        <div>
+          <div class="repo-name">${esc(r.owner)}/${esc(r.repo)}</div>
+          <div class="repo-meta">connected ${fmtTime(r.created_at)}</div>
+        </div>
+        <button class="btn-remove" onclick="removeRepo(${r.id})">Remove</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  html += `
+  <div class="section-title" style="margin-top:28px">Add a Repo</div>
+  <form class="add-repo-form" onsubmit="addRepo(event)">
+    <input id="repo-input" type="text" placeholder="owner/repo (e.g. dide1/loupe)" autocomplete="off">
+    <button type="submit" class="btn-primary">Connect</button>
+  </form>`;
+
+  el.innerHTML = html;
+}
+
+async function addRepo(e) {
+  e.preventDefault();
+  const input = $('repo-input');
+  const val = input.value.trim();
+  if (!val || !val.includes('/')) {
+    input.style.borderColor = 'var(--critical)';
+    return;
+  }
+  input.style.borderColor = '';
+  try {
+    const res = await fetch('/me/repos', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo: val}),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert(err.detail || 'Failed to add repo');
+      return;
+    }
+    const row = await res.json();
+    input.value = '';
+    _pendingWebhook = row;
+    // Reload me
+    _me = await fetch('/me').then(r => r.json());
+    renderRepos(_me.repos);
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  }
+}
+
+async function removeRepo(repoId) {
+  if (!confirm('Remove this repo? Existing incidents will remain.')) return;
+  await fetch(`/me/repos/${repoId}`, {method: 'DELETE'});
+  _me = await fetch('/me').then(r => r.json());
+  renderRepos(_me.repos);
+}
+
+async function loadMe() {
+  try {
+    _me = await fetch('/me').then(r => r.json());
+    if (_me.username) {
+      $('user-info').innerHTML = `signed in as <strong>${esc(_me.username)}</strong>`;
+    }
+    // First-time user: auto-show repos tab
+    if (_me.repos && _me.repos.length === 0 && active === 'incidents') {
+      show('repos');
+    }
+  } catch (_) {}
+}
+
 async function refresh() {
   try {
     const [inc, pms] = await Promise.all([
@@ -267,7 +431,7 @@ async function refresh() {
     ]);
     $('view-incidents').innerHTML = inc.length
       ? inc.map(incidentCard).join('')
-      : '<div class="empty">No incidents yet. Break something.</div>';
+      : '<div class="empty">No incidents yet — connect a repo and push a failing commit.</div>';
     $('view-postmortems').innerHTML = pms.length
       ? pms.map(pmCard).join('')
       : '<div class="empty">No postmortems yet — they appear when incidents resolve.</div>';
@@ -277,6 +441,8 @@ async function refresh() {
     $('status').textContent = 'connection lost — retrying…';
   }
 }
+
+loadMe();
 refresh();
 setInterval(refresh, 15000);
 </script>

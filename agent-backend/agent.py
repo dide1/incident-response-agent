@@ -128,7 +128,7 @@ def run_agent(alert: dict) -> dict:
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            raw_result = dispatch(block.name, block.input)
+            raw_result = dispatch(block.name, block.input, alert_context=alert)
             tool_log.append({
                 "tool": block.name,
                 "input": block.input,

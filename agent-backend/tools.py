@@ -145,16 +145,25 @@ TOOL_DEFINITIONS = [
 ]
 
 
-def dispatch(name: str, inputs: dict) -> str:
+def dispatch(name: str, inputs: dict, alert_context: dict | None = None) -> str:
     """Execute a tool call and return a JSON string result."""
     logger.info("Tool call: %s(%s)", name, json.dumps(inputs))
+
+    ctx = alert_context or {}
+    github_token: str | None = ctx.get("github_token")
+    github_repo: str | None = ctx.get("github_repo")
 
     if name == "get_recent_deploys":
         from github_client import list_recent_commits, repo_for_service
         service = inputs["service"]
         window = inputs.get("window_minutes", 60)
-        if repo_for_service(service):
-            rows = list_recent_commits(service, window, branch=inputs.get("branch"))
+        if github_repo or repo_for_service(service):
+            rows = list_recent_commits(
+                service, window,
+                branch=inputs.get("branch"),
+                github_repo=github_repo,
+                token=github_token,
+            )
         else:
             rows = fetch_recent_deploys(service, window)
         result = rows if rows else []
@@ -163,12 +172,15 @@ def dispatch(name: str, inputs: dict) -> str:
         row = fetch_commit_diff(inputs["sha"])
         if row is None:
             from github_client import fetch_commit_diff as gh_fetch_diff
-            row = gh_fetch_diff(inputs["sha"])
+            row = gh_fetch_diff(inputs["sha"], token=github_token)
         result = row if row else {"error": f"No diff found for SHA {inputs['sha']}"}
 
     elif name == "get_ci_logs":
         from github_client import fetch_ci_logs
-        result = fetch_ci_logs(inputs["service"], inputs.get("run_id"))
+        result = fetch_ci_logs(
+            inputs["service"], inputs.get("run_id"),
+            github_repo=github_repo, token=github_token,
+        )
 
     elif name == "search_runbooks":
         from embedder import embed

@@ -28,7 +28,7 @@ def _run(run_id, conclusion, status="completed", name="ci", branch="main"):
 
 
 def _patch_runs(monkeypatch, runs):
-    monkeypatch.setattr(ci_poller, "_fetch_recent_runs", lambda repo: runs)
+    monkeypatch.setattr(ci_poller, "_fetch_recent_runs", lambda repo, token=None: runs)
 
 
 class TestSeeding:

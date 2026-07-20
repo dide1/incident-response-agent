@@ -39,22 +39,32 @@ def repo_for_service(service: str) -> str | None:
     return configured_repos().get(service)
 
 
-def _request(path_or_url: str, accept: str = "application/vnd.github+json") -> bytes:
+def _request(
+    path_or_url: str,
+    accept: str = "application/vnd.github+json",
+    token: str | None = None,
+) -> bytes:
     url = path_or_url if path_or_url.startswith("http") else f"{GITHUB_API}{path_or_url}"
     headers = {"Accept": accept, "User-Agent": "incident-response-agent"}
-    token = os.getenv("GITHUB_TOKEN", "")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    effective_token = token or os.getenv("GITHUB_TOKEN", "")
+    if effective_token:
+        headers["Authorization"] = f"Bearer {effective_token}"
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return resp.read()
 
 
-def _get_json(path: str):
-    return json.loads(_request(path))
+def _get_json(path: str, token: str | None = None):
+    return json.loads(_request(path, token=token))
 
 
-def list_recent_commits(service: str, window_minutes: int, branch: str | None = None) -> list[dict]:
+def list_recent_commits(
+    service: str,
+    window_minutes: int,
+    branch: str | None = None,
+    github_repo: str | None = None,
+    token: str | None = None,
+) -> list[dict]:
     """
     Real commits from the configured repo, shaped like deploy_tracker rows so the
     agent's get_recent_deploys tool interface is unchanged.
@@ -67,7 +77,7 @@ def list_recent_commits(service: str, window_minutes: int, branch: str | None = 
     have no pushes in the last 90 minutes) — deployed_at stays honest so the
     agent can see they are older than the alert.
     """
-    repo = repo_for_service(service)
+    repo = github_repo or repo_for_service(service)
     if not repo:
         return []
 
@@ -76,9 +86,13 @@ def list_recent_commits(service: str, window_minutes: int, branch: str | None = 
         "%Y-%m-%dT%H:%M:%SZ"
     )
     try:
-        commits = _get_json(f"/repos/{repo}/commits?since={since}&per_page=20{branch_param}")
+        commits = _get_json(
+            f"/repos/{repo}/commits?since={since}&per_page=20{branch_param}", token=token
+        )
         if not commits:
-            commits = _get_json(f"/repos/{repo}/commits?per_page=5{branch_param}")
+            commits = _get_json(
+                f"/repos/{repo}/commits?per_page=5{branch_param}", token=token
+            )
             logger.info(
                 "No commits in %dm window for %s (branch=%s) — returning last %d commits",
                 window_minutes, repo, branch or "default", len(commits),
@@ -104,7 +118,7 @@ def list_recent_commits(service: str, window_minutes: int, branch: str | None = 
     return rows
 
 
-def fetch_commit_diff(sha: str) -> dict | None:
+def fetch_commit_diff(sha: str, token: str | None = None) -> dict | None:
     """Real diff for a sha, from the cache-resolved repo or by trying each configured repo."""
     candidates = []
     if sha in _sha_repo_cache:
@@ -114,7 +128,9 @@ def fetch_commit_diff(sha: str) -> dict | None:
     for repo in candidates:
         try:
             raw = _request(
-                f"/repos/{repo}/commits/{sha}", accept="application/vnd.github.diff"
+                f"/repos/{repo}/commits/{sha}",
+                accept="application/vnd.github.diff",
+                token=token,
             ).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code in (404, 422):
@@ -129,26 +145,35 @@ def fetch_commit_diff(sha: str) -> dict | None:
     return None
 
 
-def fetch_ci_logs(service: str, run_id: int | None = None) -> dict:
+def fetch_ci_logs(
+    service: str,
+    run_id: int | None = None,
+    github_repo: str | None = None,
+    token: str | None = None,
+) -> dict:
     """
     Failed-job log tails for a GitHub Actions run. When run_id is omitted,
     uses the most recent failed run in the repo.
     """
-    repo = repo_for_service(service)
+    repo = github_repo or repo_for_service(service)
     if not repo:
         return {"error": f"No GitHub repo configured for service '{service}'"}
 
     try:
         if run_id is None:
-            runs = _get_json(f"/repos/{repo}/actions/runs?status=failure&per_page=1")
+            runs = _get_json(
+                f"/repos/{repo}/actions/runs?status=failure&per_page=1", token=token
+            )
             if not runs.get("workflow_runs"):
                 return {"error": f"No failed workflow runs found in {repo}"}
             run = runs["workflow_runs"][0]
             run_id = run["id"]
         else:
-            run = _get_json(f"/repos/{repo}/actions/runs/{run_id}")
+            run = _get_json(f"/repos/{repo}/actions/runs/{run_id}", token=token)
 
-        jobs = _get_json(f"/repos/{repo}/actions/runs/{run_id}/jobs").get("jobs", [])
+        jobs = _get_json(
+            f"/repos/{repo}/actions/runs/{run_id}/jobs", token=token
+        ).get("jobs", [])
         failed_jobs = [j for j in jobs if j.get("conclusion") == "failure"]
 
         results = []
@@ -158,9 +183,9 @@ def fetch_ci_logs(service: str, run_id: int | None = None) -> dict:
             ]
             entry = {"job": job["name"], "failed_steps": failed_steps, "log_tail": ""}
             try:
-                log_text = _request(f"/repos/{repo}/actions/jobs/{job['id']}/logs").decode(
-                    "utf-8", errors="replace"
-                )
+                log_text = _request(
+                    f"/repos/{repo}/actions/jobs/{job['id']}/logs", token=token
+                ).decode("utf-8", errors="replace")
                 entry["log_tail"] = "\n".join(log_text.splitlines()[-MAX_LOG_LINES:])
             except urllib.error.HTTPError as exc:
                 entry["log_tail"] = f"[log fetch failed: HTTP {exc.code}]"

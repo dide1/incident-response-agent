@@ -1,7 +1,6 @@
-"""GitHub OAuth login — restricts dashboard access to ALLOWED_GITHUB_USER."""
+"""GitHub OAuth login — multi-user; any GitHub account can sign in."""
 import json
 import os
-import secrets
 import urllib.parse
 import urllib.request
 
@@ -9,7 +8,8 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
-ALLOWED_GITHUB_USER = os.getenv("ALLOWED_GITHUB_USER", "dide1")
+# Optional: if set, only this GitHub username is allowed. Empty = anyone.
+ALLOWED_GITHUB_USER = os.getenv("ALLOWED_GITHUB_USER", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 
 COOKIE_NAME = "ira_session"
@@ -22,15 +22,17 @@ def _signer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(SESSION_SECRET)
 
 
-def make_session_cookie(username: str) -> str:
-    return _signer().dumps({"u": username})
+def make_session_cookie(user_id: int, username: str) -> str:
+    return _signer().dumps({"uid": user_id, "u": username})
 
 
-def verify_session_cookie(cookie: str) -> str | None:
-    """Return the GitHub username if the cookie is valid, else None."""
+def verify_session_cookie(cookie: str) -> dict | None:
+    """Return {"uid": int, "u": str} if the cookie is valid, else None."""
     try:
         data = _signer().loads(cookie, max_age=COOKIE_MAX_AGE)
-        return data.get("u")
+        if "uid" in data and "u" in data:
+            return data
+        return None
     except (BadSignature, SignatureExpired, Exception):
         return None
 
@@ -43,7 +45,7 @@ def github_auth_url(state: str) -> str:
     params = urllib.parse.urlencode({
         "client_id": GITHUB_CLIENT_ID,
         "state": state,
-        "scope": "read:user",
+        "scope": "read:user repo",
     })
     return f"https://github.com/login/oauth/authorize?{params}"
 
@@ -65,7 +67,8 @@ def exchange_code(code: str) -> str | None:
     return result.get("access_token")
 
 
-def get_github_username(token: str) -> str | None:
+def get_github_user_info(token: str) -> dict | None:
+    """Return {"id": int, "login": str} or None on failure."""
     req = urllib.request.Request(
         "https://api.github.com/user",
         headers={
@@ -75,4 +78,6 @@ def get_github_username(token: str) -> str | None:
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read())
-    return data.get("login")
+    if "id" not in data or "login" not in data:
+        return None
+    return {"id": data["id"], "login": data["login"]}

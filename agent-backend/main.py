@@ -13,10 +13,11 @@ import pathlib
 
 from agent import run_agent
 from db import (
-    clear_deploys, complete_incident, create_incident, fail_incident, init_db,
-    insert_deploy, insert_postmortem, get_latest_postmortem, list_deploys,
-    list_incidents, list_postmortems, list_runbooks_db, resolve_incident,
-    upsert_runbook,
+    add_repo, clear_deploys, complete_incident, create_incident, fail_incident,
+    get_or_create_user, get_repo_by_full_name, get_user_by_id, init_db, insert_deploy,
+    insert_postmortem, get_latest_postmortem, list_deploys, list_incidents,
+    list_postmortems, list_runbooks_db, list_user_repos, remove_repo,
+    resolve_incident, upsert_runbook,
 )
 
 logging.basicConfig(
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Startup runbook ingestion skipped: %s", exc)
 
-    # CI poller (no-op when GITHUB_REPOS is unset)
+    # CI poller — always starts; polls env repos + DB repos each iteration
     from ci_poller import poll_github_loop
     poller = asyncio.create_task(
         poll_github_loop(_run_agent_background, _generate_postmortem_background)
@@ -81,13 +82,19 @@ _PUBLIC_PREFIXES = ("/webhook", "/health", "/auth")
 async def auth_middleware(request: Request, call_next):
     from auth import COOKIE_NAME, is_auth_enabled, verify_session_cookie
     if not is_auth_enabled():
+        request.state.user_id = None
+        request.state.username = None
         return await call_next(request)
     path = request.url.path
     if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
         return await call_next(request)
     cookie = request.cookies.get(COOKIE_NAME)
-    if cookie and verify_session_cookie(cookie):
-        return await call_next(request)
+    if cookie:
+        session = verify_session_cookie(cookie)
+        if session:
+            request.state.user_id = session.get("uid")
+            request.state.username = session.get("u")
+            return await call_next(request)
     return RedirectResponse(url="/auth/login")
 
 
@@ -127,11 +134,12 @@ async def receive_alert(payload: dict):
 async def _run_agent_background(alert: dict) -> None:
     service = alert.get("service", "unknown")
     alertname = alert.get("alertname", "unknown")
-    logger.info("Agent starting for %s on %s", alertname, service)
+    user_id = alert.get("user_id")
+    logger.info("Agent starting for %s on %s (user_id=%s)", alertname, service, user_id)
 
     incident_id = None
     try:
-        incident_id = create_incident(alert)  # status: investigating
+        incident_id = create_incident(alert, user_id=user_id)
     except Exception:
         logger.exception("Failed to create incident row")
 
@@ -153,7 +161,7 @@ async def _run_agent_background(alert: dict) -> None:
 
         if incident_id is not None:
             try:
-                complete_incident(incident_id, result)  # status: brief_posted
+                complete_incident(incident_id, result)
             except Exception:
                 logger.exception("Failed to persist incident result")
 
@@ -165,7 +173,7 @@ async def _run_agent_background(alert: dict) -> None:
         logger.exception("Agent failed for alert=%s service=%s", alertname, service)
         if incident_id is not None:
             try:
-                fail_incident(incident_id)  # status: failed
+                fail_incident(incident_id)
             except Exception:
                 logger.exception("Failed to mark incident failed")
 
@@ -176,13 +184,23 @@ async def receive_github_webhook(request: Request):
     GitHub webhook receiver.
     - workflow_run (completed, conclusion=failure) → run the agent as a CIFailure incident
     - push → record commits into deploy_tracker (deploy history for the repo)
-    Verifies X-Hub-Signature-256 when GITHUB_WEBHOOK_SECRET is set.
+
+    Verifies X-Hub-Signature-256 using the per-repo secret stored in the DB,
+    falling back to GITHUB_WEBHOOK_SECRET env var for env-configured repos.
     """
     import hashlib
     import hmac
 
     body = await request.body()
-    secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    payload = json.loads(body) if body else {}
+    repo_name = payload.get("repository", {}).get("name", "unknown")
+    repo_owner = payload.get("repository", {}).get("owner", {}).get("login", "")
+
+    # Look up per-repo user + secret from DB
+    repo_row = get_repo_by_full_name(repo_owner, repo_name) if repo_owner else None
+
+    # Determine webhook secret: per-repo DB secret takes precedence
+    secret = (repo_row and repo_row.get("webhook_secret")) or os.getenv("GITHUB_WEBHOOK_SECRET", "")
     if secret:
         signature = request.headers.get("X-Hub-Signature-256", "")
         expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -190,13 +208,11 @@ async def receive_github_webhook(request: Request):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     event = request.headers.get("X-GitHub-Event", "")
-    payload = json.loads(body) if body else {}
-    repo_name = payload.get("repository", {}).get("name", "unknown")
 
     if event == "workflow_run":
         run = payload.get("workflow_run", {})
         if payload.get("action") == "completed" and run.get("conclusion") == "failure":
-            alert_context = {
+            alert_context: dict = {
                 "alertname": "CIFailure",
                 "service": repo_name,
                 "severity": "warning",
@@ -207,6 +223,10 @@ async def receive_github_webhook(request: Request):
                 ),
                 "starts_at": run.get("run_started_at"),
             }
+            if repo_row:
+                alert_context["user_id"] = repo_row["user_id"]
+                alert_context["github_token"] = repo_row["access_token"]
+                alert_context["github_repo"] = f"{repo_owner}/{repo_name}"
             logger.info("CI failure webhook: %s run %s", repo_name, run.get("id"))
             asyncio.create_task(_run_agent_background(alert_context))
             return {"status": "investigating", "run_id": run.get("id")}
@@ -249,11 +269,12 @@ async def _generate_postmortem_background(alertname: str, service: str, resolved
         )
         return
 
-    logger.info("Generating postmortem for %s on %s", alertname, service)
+    user_id = incident.get("alert", {}).get("user_id")
+    logger.info("Generating postmortem for %s on %s (user_id=%s)", alertname, service, user_id)
     try:
         loop = asyncio.get_event_loop()
         content = await loop.run_in_executor(None, generate_postmortem, incident, resolved_at)
-        pm_id = insert_postmortem(alertname, service, content, incident)
+        pm_id = insert_postmortem(alertname, service, content, incident, user_id=user_id)
         resolved_id = resolve_incident(alertname, service, resolved_at, pm_id)
         if resolved_id:
             logger.info("Incident %d resolved (postmortem %d)", resolved_id, pm_id)
@@ -336,16 +357,53 @@ async def dashboard():
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
 
+@app.get("/me")
+async def get_me(request: Request):
+    """Current user info + connected repos."""
+    user_id = getattr(request.state, "user_id", None)
+    username = getattr(request.state, "username", None)
+    repos = list_user_repos(user_id) if user_id else []
+    return {"user_id": user_id, "username": username, "repos": repos}
+
+
+@app.post("/me/repos", status_code=201)
+async def add_user_repo(request: Request, body: dict):
+    """Connect a GitHub repo. Body: {"repo": "owner/repo"}"""
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    owner_repo = body.get("repo", "").strip()
+    if "/" not in owner_repo or owner_repo.count("/") != 1:
+        raise HTTPException(status_code=422, detail="repo must be 'owner/repo'")
+    owner, repo_name = owner_repo.split("/", 1)
+    import secrets as _secrets
+    webhook_secret = _secrets.token_hex(20)
+    row = add_repo(user_id, owner, repo_name, webhook_secret)
+    webhook_url = str(request.base_url).rstrip("/") + "/webhook/github"
+    return {**row, "webhook_url": webhook_url, "webhook_secret": webhook_secret}
+
+
+@app.delete("/me/repos/{repo_id}", status_code=204)
+async def remove_user_repo(request: Request, repo_id: int):
+    """Disconnect a repo."""
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    remove_repo(user_id, repo_id)
+
+
 @app.get("/incidents")
-async def get_incidents(limit: int = 50):
-    """Persisted incident history, newest first."""
-    return list_incidents(limit=limit)
+async def get_incidents(request: Request, limit: int = 50):
+    """Persisted incident history, scoped to the logged-in user."""
+    user_id = getattr(request.state, "user_id", None)
+    return list_incidents(user_id=user_id, limit=limit)
 
 
 @app.get("/postmortems")
-async def get_postmortems(limit: int = 20):
-    """Persisted postmortems, newest first."""
-    return list_postmortems(limit=limit)
+async def get_postmortems(request: Request, limit: int = 20):
+    """Persisted postmortems, scoped to the logged-in user."""
+    user_id = getattr(request.state, "user_id", None)
+    return list_postmortems(user_id=user_id, limit=limit)
 
 
 @app.get("/postmortems/latest")
@@ -389,7 +447,7 @@ async def auth_login(request: Request):
 async def auth_callback(request: Request, code: str = "", state: str = ""):
     from auth import (
         ALLOWED_GITHUB_USER, COOKIE_NAME, COOKIE_MAX_AGE,
-        exchange_code, get_github_username, make_session_cookie,
+        exchange_code, get_github_user_info, make_session_cookie,
     )
     saved_state = request.cookies.get("ira_oauth_state", "")
     if not state or state != saved_state:
@@ -397,10 +455,17 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
     token = exchange_code(code)
     if not token:
         raise HTTPException(status_code=400, detail="Failed to exchange OAuth code")
-    username = get_github_username(token)
-    if username != ALLOWED_GITHUB_USER:
-        raise HTTPException(status_code=403, detail=f"Access restricted to {ALLOWED_GITHUB_USER}")
-    session_cookie = make_session_cookie(username)
+    user_info = get_github_user_info(token)
+    if not user_info:
+        raise HTTPException(status_code=400, detail="Failed to get GitHub user info")
+    # Optional allowlist: if ALLOWED_GITHUB_USER is set, enforce it
+    if ALLOWED_GITHUB_USER and user_info["login"] != ALLOWED_GITHUB_USER:
+        raise HTTPException(status_code=403, detail=f"Access restricted")
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        None, get_or_create_user, user_info["id"], user_info["login"], token
+    )
+    session_cookie = make_session_cookie(user["id"], user_info["login"])
     response = RedirectResponse(url="/")
     response.set_cookie(
         COOKIE_NAME, session_cookie,
