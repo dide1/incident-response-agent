@@ -4,3 +4,4 @@ anthropic>=0.40.0
 psycopg2-binary==2.9.9
 pgvector==0.3.2
 fastembed==0.3.6
+itsdangerous==2.2.0

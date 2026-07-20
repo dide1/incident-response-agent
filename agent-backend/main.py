@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 import os
 import pathlib
@@ -72,6 +72,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Incident Response Agent", lifespan=lifespan)
+
+# Routes that don't require authentication
+_PUBLIC_PREFIXES = ("/webhook", "/health", "/auth")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    from auth import COOKIE_NAME, is_auth_enabled, verify_session_cookie
+    if not is_auth_enabled():
+        return await call_next(request)
+    path = request.url.path
+    if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie and verify_session_cookie(cookie):
+        return await call_next(request)
+    return RedirectResponse(url="/auth/login")
 
 
 @app.post("/webhook")
@@ -354,6 +371,51 @@ async def admin_generate_postmortem(body: dict):
         raise HTTPException(status_code=422, detail="alertname and service required")
     asyncio.create_task(_generate_postmortem_background(alertname, service, resolved_at))
     return {"status": "postmortem_generation_started"}
+
+
+@app.get("/auth/login")
+async def auth_login(request: Request):
+    import secrets as _secrets
+    from auth import github_auth_url, is_auth_enabled
+    if not is_auth_enabled():
+        return RedirectResponse(url="/")
+    state = _secrets.token_urlsafe(16)
+    response = RedirectResponse(url=github_auth_url(state))
+    response.set_cookie("ira_oauth_state", state, max_age=600, httponly=True, samesite="lax")
+    return response
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, code: str = "", state: str = ""):
+    from auth import (
+        ALLOWED_GITHUB_USER, COOKIE_NAME, COOKIE_MAX_AGE,
+        exchange_code, get_github_username, make_session_cookie,
+    )
+    saved_state = request.cookies.get("ira_oauth_state", "")
+    if not state or state != saved_state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    token = exchange_code(code)
+    if not token:
+        raise HTTPException(status_code=400, detail="Failed to exchange OAuth code")
+    username = get_github_username(token)
+    if username != ALLOWED_GITHUB_USER:
+        raise HTTPException(status_code=403, detail=f"Access restricted to {ALLOWED_GITHUB_USER}")
+    session_cookie = make_session_cookie(username)
+    response = RedirectResponse(url="/")
+    response.set_cookie(
+        COOKIE_NAME, session_cookie,
+        max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax", secure=True,
+    )
+    response.delete_cookie("ira_oauth_state")
+    return response
+
+
+@app.get("/auth/logout")
+async def auth_logout():
+    from auth import COOKIE_NAME
+    response = RedirectResponse(url="/auth/login")
+    response.delete_cookie(COOKIE_NAME)
+    return response
 
 
 @app.get("/health")
