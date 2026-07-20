@@ -413,7 +413,23 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
 @app.get("/auth/logout")
 async def auth_logout():
     from auth import COOKIE_NAME
-    response = RedirectResponse(url="/auth/login")
+    html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Signed out</title>
+<style>
+  body{font:16px/1.6 -apple-system,sans-serif;background:#faf8f4;color:#1c1917;
+    display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+  .box{text-align:center}
+  h2{font-family:Georgia,serif;font-weight:600;margin:0 0 12px}
+  p{color:#78716c;margin:0 0 24px}
+  a{display:inline-block;padding:10px 24px;background:#8c4a2f;color:#fff;
+    border-radius:4px;text-decoration:none;font-size:14px}
+</style></head>
+<body><div class="box">
+  <h2>Signed out</h2>
+  <p>You've been signed out of Incident Response Agent.</p>
+  <a href="/auth/login">Sign in again</a>
+</div></body></html>"""
+    response = HTMLResponse(html)
     response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=True)
     return response
 
