@@ -414,7 +414,7 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
 async def auth_logout():
     from auth import COOKIE_NAME
     response = RedirectResponse(url="/auth/login")
-    response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax", secure=True)
     return response
 
 
