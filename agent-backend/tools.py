@@ -83,7 +83,11 @@ TOOL_DEFINITIONS = [
             "Fetch the failed-job logs for a GitHub Actions CI run. Use this for "
             "CI/build failure alerts instead of query_prometheus. Returns the "
             "workflow name, head commit sha, branch, failed job names, failed step "
-            "names, and the tail of each failed job's log output."
+            "names, and per-job log output. Each job entry contains either "
+            "'log_analysis' (structured: failed_tests list, error_signatures list, "
+            "stack_traces list) when the analyzer is available, or 'log_tail' "
+            "(raw last 150 lines). Prefer log_analysis fields when present — they "
+            "are pre-parsed and deduplicated for faster diagnosis."
         ),
         "input_schema": {
             "type": "object",

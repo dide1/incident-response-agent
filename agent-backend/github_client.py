@@ -8,6 +8,8 @@ Configuration (env):
 import json
 import logging
 import os
+import pathlib
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +21,35 @@ GITHUB_API = "https://api.github.com"
 
 MAX_DIFF_CHARS = 6000
 MAX_LOG_LINES = 150
+
+# Path to the compiled Rust log-analyzer binary.
+# Override with LOG_ANALYZER_BIN env var; otherwise look next to the repo root.
+_LOG_ANALYZER_BIN = os.getenv("LOG_ANALYZER_BIN") or str(
+    pathlib.Path(__file__).parent.parent / "log-analyzer" / "target" / "release" / "log-analyzer"
+)
+
+
+def _analyze_log(log_text: str) -> "dict | str":
+    """
+    Structured log analysis via Rust binary when available; raw tail otherwise.
+    Returns a dict {failed_tests, error_signatures, stack_traces, line_count}
+    or a plain string (last MAX_LOG_LINES lines) if the binary isn't present.
+    """
+    if pathlib.Path(_LOG_ANALYZER_BIN).exists():
+        try:
+            proc = subprocess.run(
+                [_LOG_ANALYZER_BIN, "--all"],
+                input=log_text,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                return json.loads(proc.stdout)
+            logger.warning("log-analyzer exited %d: %s", proc.returncode, proc.stderr[:200])
+        except Exception as exc:
+            logger.warning("log-analyzer failed: %s", exc)
+    return "\n".join(log_text.splitlines()[-MAX_LOG_LINES:])
 
 # sha -> owner/repo, populated by list_recent_commits so get_commit_diff can
 # resolve which repo a sha belongs to without an extra search
@@ -186,7 +217,11 @@ def fetch_ci_logs(
                 log_text = _request(
                     f"/repos/{repo}/actions/jobs/{job['id']}/logs", token=token
                 ).decode("utf-8", errors="replace")
-                entry["log_tail"] = "\n".join(log_text.splitlines()[-MAX_LOG_LINES:])
+                analysis = _analyze_log(log_text)
+                if isinstance(analysis, dict):
+                    entry["log_analysis"] = analysis
+                else:
+                    entry["log_tail"] = analysis
             except urllib.error.HTTPError as exc:
                 entry["log_tail"] = f"[log fetch failed: HTTP {exc.code}]"
             results.append(entry)
