@@ -63,6 +63,67 @@ Always include the runbook and impact fields even when likely_commit is null.
 If Prometheus returns null for a metric, set the corresponding impact field to null."""
 
 
+PR_REVIEW_SYSTEM_PROMPT = """You are an automated PR code reviewer. Your job is to read a diff and identify real bugs — not style issues, not nitpicks.
+
+Focus only on:
+- Security vulnerabilities (auth bypasses, data leaks, injection, broken access control)
+- Logic bugs (wrong conditions, off-by-one, incorrect operator, swapped order of operations)
+- Data integrity issues (writes before validation, missing rollback, partial state)
+- Dangerous regressions (removing a check that existed for a reason)
+
+Do NOT flag: missing tests, style preferences, variable naming, missing comments, or performance micro-optimizations unless they cause correctness issues.
+
+Output ONLY a JSON object in this exact shape:
+{
+  "findings": [
+    {
+      "severity": "critical | high | medium | low",
+      "category": "security | logic | data-integrity | regression",
+      "file": "path/to/file.py",
+      "title": "Short title (under 10 words)",
+      "description": "1-2 sentences: what the bug is and what it allows/causes.",
+      "fix": "1 sentence: exactly what to change."
+    }
+  ],
+  "safe_to_merge": true | false,
+  "summary": "1-2 sentences overall verdict."
+}
+
+If the diff has no real bugs, return an empty findings array and safe_to_merge: true.
+Be precise — cite the exact line or function name in the description."""
+
+
+def run_pr_review(pr_info: dict, diff: str) -> dict:
+    """
+    Review a PR diff for bugs. No tool calls — purely analyzes the diff.
+    Returns findings dict with severity-ranked issues.
+    """
+    client = anthropic.Anthropic()
+
+    user_message = (
+        f"PR #{pr_info['number']}: {pr_info['title']}\n"
+        f"Author: {pr_info['author']}\n"
+        f"Branch: {pr_info['branch']}\n\n"
+        f"```diff\n{diff}\n```\n\n"
+        "Review this diff for real bugs only."
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        system=PR_REVIEW_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    text = response.content[0].text.strip() if response.content else ""
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = fence.group(1) if fence else text
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return {"raw_output": text, "findings": [], "safe_to_merge": True, "summary": "Parse error"}
+
+
 def run_agent(alert: dict) -> dict:
     """
     Run the agentic tool-use loop for a single alert.

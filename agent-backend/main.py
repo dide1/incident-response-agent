@@ -68,8 +68,13 @@ async def lifespan(app: FastAPI):
         poll_github_loop(_run_agent_background, _generate_postmortem_background)
     )
 
+    # PR reviewer — runs alongside CI poller, triggers on new/updated PRs
+    from pr_reviewer import poll_pr_loop
+    pr_poller = asyncio.create_task(poll_pr_loop(_run_pr_review_background))
+
     yield
     poller.cancel()
+    pr_poller.cancel()
 
 
 app = FastAPI(title="Incident Response Agent", lifespan=lifespan)
@@ -176,6 +181,48 @@ async def _run_agent_background(alert: dict) -> None:
                 fail_incident(incident_id)
             except Exception:
                 logger.exception("Failed to mark incident failed")
+
+
+async def _run_pr_review_background(service: str, repo: str, pr: dict, result: dict) -> None:
+    pr_number = pr.get("number")
+    findings = result.get("findings", [])
+    safe = result.get("safe_to_merge", True)
+    logger.info(
+        "PR review complete: %s#%d — %d finding(s), safe_to_merge=%s",
+        repo, pr_number, len(findings), safe,
+    )
+    logger.info("=" * 70)
+    logger.info("PR REVIEW  repo=%s  pr=#%d", repo, pr_number)
+    logger.info(json.dumps(result, indent=2, default=str))
+    logger.info("=" * 70)
+
+    loop = asyncio.get_event_loop()
+
+    # Post comment to the PR
+    try:
+        from pr_reviewer import _format_pr_comment
+        from github_client import post_pr_comment
+        comment = _format_pr_comment(result)
+        token = None
+        try:
+            from db import get_all_repos_with_token
+            for row in get_all_repos_with_token():
+                if f"{row['owner']}/{row['repo']}" == repo:
+                    token = row["access_token"]
+                    break
+        except Exception:
+            pass
+        await loop.run_in_executor(None, post_pr_comment, repo, pr_number, comment, token)
+        logger.info("PR comment posted to %s#%d", repo, pr_number)
+    except Exception:
+        logger.exception("Failed to post PR comment to %s#%d", repo, pr_number)
+
+    # Slack — only for critical/high findings
+    try:
+        from slack_notifier import post_slack_pr_review
+        await loop.run_in_executor(None, post_slack_pr_review, pr, repo, result)
+    except Exception:
+        logger.exception("Failed to post PR review Slack notice")
 
 
 @app.post("/webhook/github")

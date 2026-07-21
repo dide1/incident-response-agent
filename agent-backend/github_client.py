@@ -176,6 +176,61 @@ def fetch_commit_diff(sha: str, token: str | None = None) -> dict | None:
     return None
 
 
+def fetch_open_prs(repo: str, token: str | None = None) -> list[dict]:
+    """Return open PRs: number, title, head sha, branch, author, url."""
+    try:
+        data = _get_json(f"/repos/{repo}/pulls?state=open&per_page=20", token=token)
+    except urllib.error.HTTPError as exc:
+        logger.warning("PR fetch failed for %s: %s", repo, exc)
+        return []
+    return [
+        {
+            "number": pr["number"],
+            "title": pr["title"],
+            "head_sha": pr["head"]["sha"],
+            "branch": pr["head"]["ref"],
+            "author": pr["user"]["login"],
+            "html_url": pr["html_url"],
+        }
+        for pr in data
+    ]
+
+
+def fetch_pr_diff(repo: str, pr_number: int, token: str | None = None) -> str:
+    """Unified diff for a pull request."""
+    try:
+        raw = _request(
+            f"/repos/{repo}/pulls/{pr_number}",
+            accept="application/vnd.github.diff",
+            token=token,
+        ).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return f"[diff fetch failed: HTTP {exc.code}]"
+    if len(raw) > MAX_DIFF_CHARS:
+        raw = raw[:MAX_DIFF_CHARS] + f"\n... [diff truncated, {len(raw) - MAX_DIFF_CHARS} more chars]"
+    return raw
+
+
+def post_pr_comment(repo: str, pr_number: int, body: str, token: str | None = None) -> None:
+    """Post a comment on a GitHub PR."""
+    url = f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments"
+    payload = json.dumps({"body": body}).encode()
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "User-Agent": "incident-response-agent",
+    }
+    effective_token = token or os.getenv("GITHUB_TOKEN", "")
+    if effective_token:
+        headers["Authorization"] = f"Bearer {effective_token}"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        logger.error("Failed to post PR comment on %s#%d: %s", repo, pr_number, exc)
+
+
 def fetch_ci_logs(
     service: str,
     run_id: int | None = None,

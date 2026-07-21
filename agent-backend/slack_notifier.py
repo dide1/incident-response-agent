@@ -229,3 +229,72 @@ def post_slack_postmortem(incident: dict, postmortem_md: str, resolved_at: str) 
             logger.info("Postmortem Slack notice posted (status=%d)", resp.status)
     except urllib.error.URLError as exc:
         logger.error("Failed to post postmortem Slack notice: %s", exc)
+
+
+_FINDING_EMOJI = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}
+
+
+def post_slack_pr_review(pr_info: dict, repo: str, result: dict) -> None:
+    """Post a Slack notice when a PR review finds critical or high severity issues."""
+    if not SLACK_WEBHOOK_URL:
+        logger.info("SLACK_WEBHOOK_URL not set — PR review notice not posted")
+        return
+
+    findings = result.get("findings", [])
+    high_plus = [f for f in findings if f.get("severity") in ("critical", "high")]
+    if not high_plus:
+        return
+
+    safe = result.get("safe_to_merge", True)
+    summary = result.get("summary", "")
+    pr_url = pr_info.get("html_url", "")
+    pr_title = pr_info.get("title", "")
+    pr_number = pr_info.get("number", "")
+    author = pr_info.get("author", "unknown")
+
+    finding_lines = []
+    for f in findings:
+        emoji = _FINDING_EMOJI.get(f.get("severity", "low"), "⚪")
+        finding_lines.append(
+            f"{emoji} *{f.get('title', '')}* — {f.get('file', '')}\n_{f.get('description', '')}_"
+        )
+
+    status_emoji = "🚫" if not safe else "⚠️"
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"{status_emoji} PR Review: {len(high_plus)} issue(s) found — {repo}#{pr_number}",
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*<{pr_url}|{pr_title}>*\nby @{author}  ·  safe to merge: *{'no' if not safe else 'yes (with caution)'}*\n\n{summary}",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n\n".join(finding_lines)},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"incident-response-agent  ·  PR reviewer  ·  {repo}"}],
+        },
+    ]
+
+    body = json.dumps({"blocks": blocks}).encode()
+    req = urllib.request.Request(
+        SLACK_WEBHOOK_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            logger.info("PR review Slack notice posted (status=%d)", resp.status)
+    except urllib.error.URLError as exc:
+        logger.error("Failed to post PR review Slack notice: %s", exc)
