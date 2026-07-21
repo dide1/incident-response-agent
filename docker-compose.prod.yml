@@ -10,7 +10,9 @@ services:
     restart: unless-stopped
 
   agent-backend:
-    build: ./agent-backend
+    build:
+      context: .
+      dockerfile: agent-backend/Dockerfile
     ports:
       - "9000:9000"
     environment:
