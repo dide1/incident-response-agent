@@ -8,19 +8,66 @@ pub struct Analysis {
     pub line_count: usize,
 }
 
-/// Strip ANSI escape sequences (e.g., \x1b[31m color codes) from a string.
+/// Strip GitHub Actions ISO timestamp from a log line.
+/// Handles both bare lines ("2026-07-06T23:59:47.760Z content") and lines
+/// with job/step prefixes that gh CLI prepends ("job\tstep\t2026-...Z content").
+/// Scans up to 80 bytes to locate 'Z' followed by a space, with a 'T' within
+/// 25 bytes before it (confirming an ISO 8601 timestamp).
+fn strip_ci_timestamp(line: &str) -> &str {
+    let b = line.as_bytes();
+    for (i, &byte) in b.iter().enumerate().take(80) {
+        if byte == b'Z' && i > 10 && i + 1 < b.len() && b[i + 1] == b' ' {
+            let look_back = i.saturating_sub(25);
+            if b[look_back..i].iter().any(|&c| c == b'T') {
+                return &line[i + 1..];
+            }
+        }
+    }
+    line
+}
+
+/// Strip GitHub Actions problem-matcher annotations (##[error], ##[warning], ##[notice]).
+fn strip_gha_annotation(line: &str) -> &str {
+    for prefix in &["##[error]", "##[warning]", "##[notice]"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    line
+}
+
+/// Strip both CI timestamp and GHA annotations from a log line.
+pub fn normalize_line(line: &str) -> &str {
+    strip_gha_annotation(strip_ci_timestamp(line).trim_start())
+}
+
+/// Strip ANSI escape sequences from a string.
+/// Handles both real ESC bytes (\x1b[31m) and the gh CLI text representation (^[[31m).
 /// Walks char-by-char so it works without the `regex` crate.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' && chars.peek() == Some(&'[') {
+            // Real ANSI: ESC + [ + params + letter
             chars.next(); // consume '['
             for c in chars.by_ref() {
                 if c.is_ascii_alphabetic() {
-                    break; // command char ends the sequence
+                    break;
                 }
             }
+        } else if ch == '^' && chars.peek() == Some(&'[') {
+            // gh CLI text representation: ^[ maps to ESC, followed by [ + params + letter
+            chars.next(); // consume first '['
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume second '[' (the actual ANSI bracket)
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            // if not followed by a second '[', it's a literal ^[ — drop it (rare in CI logs)
         } else {
             out.push(ch);
         }
@@ -66,6 +113,15 @@ pub fn extract_failed_tests(lines: &[&str]) -> Vec<String> {
         // Jest:  "● Suite name > test name"
         } else if let Some(rest) = t.strip_prefix("● ") {
             let name = rest.trim().to_string();
+            if !name.is_empty() && seen.insert(name.clone()) {
+                tests.push(name);
+            }
+
+        // Vitest:  " FAIL  src/__tests__/foo.ts > Suite > test name"  (after trim: "FAIL  src/...")
+        } else if t.starts_with("FAIL ") && t.contains(" > ") {
+            let name = t.find(" > ")
+                .map(|pos| t[pos + 3..].trim().to_string())
+                .unwrap_or_default();
             if !name.is_empty() && seen.insert(name.clone()) {
                 tests.push(name);
             }
@@ -169,7 +225,10 @@ pub fn extract_stack_traces(lines: &[&str]) -> Vec<Vec<String>> {
 /// `tail` limits analysis to the last N lines (None = entire log).
 pub fn analyze(raw: &str, tail: Option<usize>) -> Analysis {
     let clean = strip_ansi(raw);
-    let all_lines: Vec<&str> = clean.lines().collect();
+    // Normalize: strip CI timestamps and ##[error] annotations so pattern
+    // matching works regardless of the log runner's output format.
+    let normalized: Vec<String> = clean.lines().map(|l| normalize_line(l).to_string()).collect();
+    let all_lines: Vec<&str> = normalized.iter().map(|s| s.as_str()).collect();
     let line_count = all_lines.len();
 
     let lines: Vec<&str> = match tail {
@@ -193,6 +252,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_strip_ci_timestamp_removes_prefix() {
+        // Bare timestamp (no job/step prefix)
+        let line = "2026-07-06T23:59:47.7612833Z  FAIL  src/foo.ts > suite > test";
+        assert_eq!(strip_ci_timestamp(line), "  FAIL  src/foo.ts > suite > test");
+    }
+
+    #[test]
+    fn test_strip_ci_timestamp_with_job_step_prefix() {
+        // gh CLI prepends "job\tstep\t" before the timestamp
+        let line = "test\tUNKNOWN STEP\t2026-07-06T23:59:47.762Z  FAIL  src/foo.ts > suite > test";
+        assert_eq!(strip_ci_timestamp(line), "  FAIL  src/foo.ts > suite > test");
+    }
+
+    #[test]
+    fn test_strip_ci_timestamp_passthrough_no_timestamp() {
+        let line = "FAILED tests/foo.py::test_bar";
+        assert_eq!(strip_ci_timestamp(line), line);
+    }
+
+    #[test]
+    fn test_normalize_line_strips_gha_annotation() {
+        let line = "2026-07-06T23:59:47.772Z ##[error]AssertionError: expected 0.5";
+        assert_eq!(normalize_line(line), "AssertionError: expected 0.5");
+    }
+
+    #[test]
+    fn test_failed_tests_vitest() {
+        let lines = vec![
+            " FAIL  src/__tests__/scoring.test.ts > computeDisplayScore > null aestheticScore defaults to 0.5 midpoint, not zero",
+            " FAIL  src/__tests__/scoring.test.ts > computeDisplayScore > aesthetic score maps 1→0 and 10→1 linearly",
+        ];
+        let tests = extract_failed_tests(&lines);
+        assert_eq!(tests.len(), 2);
+        assert!(tests[0].contains("null aestheticScore"));
+        assert!(tests[1].contains("aesthetic score maps"));
+    }
+
+    #[test]
+    fn test_error_signatures_gha_annotation_stripped() {
+        let raw = "2026-07-06T23:59:47.772Z ##[error]AssertionError: expected 0.5 to be close to 0.55";
+        let result = analyze(raw, None);
+        assert!(!result.error_signatures.is_empty(), "should detect AssertionError after stripping GHA prefix");
+    }
+
+    #[test]
+    fn test_analyze_vitest_log() {
+        let raw = concat!(
+            "2026-07-06T23:59:47.760Z  FAIL  src/__tests__/scoring.test.ts > computeDisplayScore > null aestheticScore defaults to 0.5 midpoint, not zero\n",
+            "2026-07-06T23:59:47.761Z  FAIL  src/__tests__/scoring.test.ts > computeDisplayScore > aesthetic score maps 1→0 and 10→1 linearly\n",
+            "2026-07-06T23:59:47.772Z ##[error]AssertionError: expected 0.5 to be close to 0.55, received difference is 0.05\n",
+        );
+        let result = analyze(raw, None);
+        assert_eq!(result.failed_tests.len(), 2, "should find 2 Vitest failures");
+        assert!(!result.error_signatures.is_empty(), "should find AssertionError");
+    }
+
+    #[test]
     fn test_strip_ansi_removes_color_codes() {
         assert_eq!(
             strip_ansi("\x1b[31mERROR\x1b[0m: something failed"),
@@ -211,6 +327,15 @@ mod tests {
         assert_eq!(
             strip_ansi("\x1b[1m\x1b[31mFAILED\x1b[0m test_foo"),
             "FAILED test_foo"
+        );
+    }
+
+    #[test]
+    fn test_strip_ansi_gh_cli_text_format() {
+        // gh CLI emits ^[[41m (literal ^+[) instead of real ESC bytes
+        assert_eq!(
+            strip_ansi("^[[41m^[[1m FAIL ^[[22m^[[49m src/foo.ts"),
+            " FAIL  src/foo.ts"
         );
     }
 
