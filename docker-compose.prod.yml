@@ -10,9 +10,7 @@ services:
     restart: unless-stopped
 
   agent-backend:
-    build:
-      context: .
-      dockerfile: agent-backend/Dockerfile
+    build: ./agent-backend
     ports:
       - "9000:9000"
     environment:
@@ -27,6 +25,9 @@ services:
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
       - SESSION_SECRET=${SESSION_SECRET:-}
       - ALLOWED_GITHUB_USER=${ALLOWED_GITHUB_USER:-}
+      - LOG_ANALYZER_BIN=/usr/local/bin/log-analyzer
+    volumes:
+      - /root/log-analyzer-linux:/usr/local/bin/log-analyzer:ro
     depends_on:
       - postgres
     restart: unless-stopped
