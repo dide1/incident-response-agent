@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 #[derive(Debug, serde::Serialize)]
 pub struct Analysis {
@@ -247,6 +250,199 @@ pub fn analyze(raw: &str, tail: Option<usize>) -> Analysis {
     }
 }
 
+// ─── Batch / concurrent processing ──────────────────────────────────────────
+
+/// One file's result paired with the path that produced it.
+/// `path` lets the caller match results back to inputs, because workers finish
+/// in non-deterministic order — output order ≠ input order.
+#[derive(Debug, serde::Serialize)]
+pub struct BatchResult {
+    pub path: String,
+    pub analysis: Analysis,
+}
+
+/// Shared work queue state, bundled into one struct so a single Arc covers
+/// everything a worker needs.
+struct Queue {
+    /// The actual work items. `Some(path)` = real job; `None` = poison pill
+    /// (tells the receiving worker to exit its loop).
+    items: Mutex<VecDeque<Option<String>>>,
+
+    /// Workers wait on this when the queue is empty.
+    /// WHY Condvar and not a spin loop: spinning wastes CPU and burns battery.
+    /// Condvar.wait() hands the OS the thread until a signal arrives.
+    not_empty: Condvar,
+
+    /// Main thread waits on this when the queue is full (backpressure).
+    /// WHY bounded: unbounded queues can exhaust memory if the producer is
+    /// faster than consumers. Bounding to 2×workers keeps memory flat.
+    not_full: Condvar,
+
+    /// Maximum number of items allowed in the queue at once.
+    capacity: usize,
+
+    /// Counts how many times the main thread actually blocked on `not_full`.
+    /// Compiled only in test mode — zero-cost in production.
+    /// WHY: the backpressure code path can't be observed from outside the queue
+    /// without instrumentation; a test that just "doesn't crash" is not a proof
+    /// that the wait() branch was ever executed.
+    #[cfg(test)]
+    producer_waits: std::sync::atomic::AtomicUsize,
+}
+
+/// Inner implementation — takes an already-constructed `Arc<Queue>` so tests
+/// can supply their own queue and inspect it after the run.
+fn process_batch_inner(
+    paths: Vec<String>,
+    queue: Arc<Queue>,
+    num_workers: usize,
+    tail: Option<usize>,
+) -> Vec<BatchResult> {
+    // ── Result channel ───────────────────────────────────────────────────────
+    let (tx, rx) = std::sync::mpsc::channel::<BatchResult>();
+
+    // ── Spawn workers ────────────────────────────────────────────────────────
+    let mut handles = Vec::with_capacity(num_workers);
+    for _ in 0..num_workers {
+        let q = Arc::clone(&queue);
+        let tx = tx.clone();
+
+        let handle = thread::spawn(move || {
+            loop {
+                let item = {
+                    let mut guard = q.items.lock().unwrap();
+                    while guard.is_empty() {
+                        guard = q.not_empty.wait(guard).unwrap();
+                    }
+                    let item = guard.pop_front().unwrap();
+                    q.not_full.notify_one();
+                    item
+                };
+
+                match item {
+                    None => break,
+                    Some(path) => {
+                        let result = fs::read_to_string(&path)
+                            .map(|text| BatchResult {
+                                path: path.clone(),
+                                analysis: analyze(&text, tail),
+                            })
+                            .unwrap_or_else(|e| BatchResult {
+                                path: path.clone(),
+                                analysis: Analysis {
+                                    failed_tests: vec![],
+                                    error_signatures: vec![format!("read error: {}", e)],
+                                    stack_traces: vec![],
+                                    line_count: 0,
+                                },
+                            });
+                        tx.send(result).unwrap();
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Drop main's Sender clone now — rx.iter() ends only when ALL Senders drop.
+    drop(tx);
+
+    // ── Push work ────────────────────────────────────────────────────────────
+    for path in paths {
+        let mut guard = queue.items.lock().unwrap();
+        while guard.len() >= queue.capacity {
+            // Increment the wait counter before sleeping so tests can assert
+            // this branch was reached. Zero-cost outside test builds.
+            #[cfg(test)]
+            queue.producer_waits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            guard = queue.not_full.wait(guard).unwrap();
+        }
+        guard.push_back(Some(path));
+        queue.not_empty.notify_one();
+    }
+
+    // ── Push poison pills ────────────────────────────────────────────────────
+    for _ in 0..num_workers {
+        let mut guard = queue.items.lock().unwrap();
+        while guard.len() >= queue.capacity {
+            #[cfg(test)]
+            queue.producer_waits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            guard = queue.not_full.wait(guard).unwrap();
+        }
+        guard.push_back(None);
+        queue.not_empty.notify_one();
+    }
+
+    // ── Collect results then join ─────────────────────────────────────────────
+    let results: Vec<BatchResult> = rx.iter().collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    results
+}
+
+/// Process a batch of log files concurrently using a fixed thread pool.
+///
+/// # Arguments
+/// * `paths`       – file paths to process (order of results is not preserved)
+/// * `num_workers` – number of parallel worker threads to spawn
+/// * `tail`        – passed through to `analyze()`; limits lines examined
+///
+/// # Design
+/// One shared `Arc<Queue>` (Mutex + two Condvars) dispatches work to workers.
+/// Results flow back via `std::sync::mpsc` (multi-producer single-consumer):
+/// each worker holds a Sender clone; main holds the Receiver.
+///
+/// Shutdown: after all paths are queued, main pushes one `None` per worker.
+/// Each worker exits when it dequeues a `None`, dropping its Sender.
+/// When all Senders are dropped, `receiver.iter()` ends automatically.
+pub fn process_batch(
+    paths: Vec<String>,
+    num_workers: usize,
+    tail: Option<usize>,
+) -> Vec<BatchResult> {
+    // Clamp to at least 1 worker so callers can pass 0 without panic.
+    let num_workers = num_workers.max(1);
+
+    // ── Shared work queue ────────────────────────────────────────────────────
+    let queue = Arc::new(Queue {
+        items: Mutex::new(VecDeque::new()),
+        not_empty: Condvar::new(),
+        not_full: Condvar::new(),
+        // 2× workers: enough buffer that main can stay ahead of workers without
+        // holding unbounded memory.
+        capacity: num_workers * 2,
+        #[cfg(test)]
+        producer_waits: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    process_batch_inner(paths, queue, num_workers, tail)
+}
+
+/// Test-only wrapper: returns both results and the number of times the main
+/// thread blocked on `not_full` (backpressure wait count).
+#[cfg(test)]
+fn process_batch_tracked(
+    paths: Vec<String>,
+    num_workers: usize,
+    tail: Option<usize>,
+) -> (Vec<BatchResult>, usize) {
+    let num_workers = num_workers.max(1);
+    let queue = Arc::new(Queue {
+        items: Mutex::new(VecDeque::new()),
+        not_empty: Condvar::new(),
+        not_full: Condvar::new(),
+        capacity: num_workers * 2,
+        producer_waits: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let results = process_batch_inner(paths, Arc::clone(&queue), num_workers, tail);
+    let waits = queue.producer_waits.load(std::sync::atomic::Ordering::Relaxed);
+    (results, waits)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +647,156 @@ mod tests {
         let raw = "FAILED tests/early.py::old_test\nFAILED tests/late.py::new_test";
         let result = analyze(raw, None);
         assert_eq!(result.failed_tests.len(), 2);
+    }
+}
+
+// ─── Concurrency correctness tests ───────────────────────────────────────────
+//
+// These tests target the synchronization layer specifically, not the parsing
+// logic. Each one is designed to catch a distinct class of concurrency bug.
+
+#[cfg(test)]
+mod concurrent_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Write N pytest-style failure lines to a temp file; return its path.
+    /// Each test uses a unique tag in the filename to avoid collisions when
+    /// cargo test runs multiple test threads simultaneously.
+    fn make_log(tag: &str, num_failures: usize) -> String {
+        let content: String = (0..num_failures)
+            .map(|i| format!("FAILED tests/suite.py::test_{i} - AssertionError\n"))
+            .collect();
+        let path = std::env::temp_dir().join(format!("log_analyzer_test_{tag}.log"));
+        fs::write(&path, content).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    // ── Test 1a: more workers than files ─────────────────────────────────────
+    // Catches bugs where extra workers consume phantom work or race on shutdown.
+    // With 8 workers and 3 files, 5 workers will idle the entire run — their
+    // poison pills must still be consumed without any worker eating two.
+    #[test]
+    fn test_all_results_present_more_workers_than_files() {
+        let files: Vec<String> = (0..3)
+            .map(|i| make_log(&format!("1a_{i}"), i + 1))
+            .collect();
+        let expected_paths: HashSet<String> = files.iter().cloned().collect();
+
+        let results = process_batch(files, 8, None);
+
+        assert_eq!(results.len(), 3, "must get exactly one result per file");
+
+        let result_paths: HashSet<String> = results.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(result_paths, expected_paths, "result paths must match input paths exactly");
+
+        // Verify no duplicates: if a result path appeared twice, the HashSet
+        // would be smaller than the Vec.
+        assert_eq!(
+            results.len(),
+            result_paths.len(),
+            "no result may be duplicated"
+        );
+    }
+
+    // ── Test 1b: fewer workers than files ─────────────────────────────────────
+    // Catches bugs where the queue drains before all files are processed (e.g.,
+    // wrong poison pill count, workers exiting too early).
+    #[test]
+    fn test_all_results_present_fewer_workers_than_files() {
+        let files: Vec<String> = (0..6)
+            .map(|i| make_log(&format!("1b_{i}"), i + 1))
+            .collect();
+        let expected_paths: HashSet<String> = files.iter().cloned().collect();
+
+        let results = process_batch(files, 2, None);
+
+        assert_eq!(results.len(), 6, "all 6 files must produce a result");
+        let result_paths: HashSet<String> = results.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(result_paths, expected_paths);
+        assert_eq!(results.len(), result_paths.len(), "no duplicates");
+    }
+
+    // ── Test 2: backpressure actually engages ─────────────────────────────────
+    // This test is the one most likely to be faked: a naive implementation that
+    // ignores queue capacity will still produce correct results — it just burns
+    // unbounded memory. We verify the wait() branch actually executed by reading
+    // the #[cfg(test)] producer_waits counter from the Queue.
+    //
+    // Setup: 1 worker → capacity = 2. We push 20 files. Main cannot push more
+    // than 2 items before a worker drains one, so it MUST block at least 18
+    // times. Files have 50 lines each so analyze() takes non-trivial CPU time,
+    // making it unlikely the worker outpaces main and empties the queue
+    // before the 3rd push.
+    #[test]
+    fn test_backpressure_actually_engages() {
+        let files: Vec<String> = (0..20)
+            .map(|i| make_log(&format!("bp_{i}"), 50))
+            .collect();
+
+        let (results, waits) = process_batch_tracked(files, 1, None);
+
+        assert_eq!(results.len(), 20, "all files must complete despite backpressure");
+        assert!(
+            waits > 0,
+            "main thread must have blocked on not_full at least once \
+             (capacity=2, 20 items pushed — expected ≥1 wait, got 0). \
+             If this fires, the not_full code path was never reached, meaning \
+             the queue is effectively unbounded."
+        );
+    }
+
+    // ── Test 3: stress — shutdown correctness under load ──────────────────────
+    // 100 files, 4 workers. Tests that all threads join cleanly with no hang
+    // or panic. A deadlock would cause cargo test to time out; a panic would
+    // surface via join().unwrap() inside process_batch_inner.
+    //
+    // Also re-verifies no lost/duplicated results at scale.
+    #[test]
+    fn test_stress_no_deadlock_no_panic_all_results_present() {
+        let n = 100;
+        let files: Vec<String> = (0..n)
+            .map(|i| make_log(&format!("stress_{i}"), 3))
+            .collect();
+        let expected_paths: HashSet<String> = files.iter().cloned().collect();
+
+        let results = process_batch(files, 4, None);
+
+        assert_eq!(results.len(), n, "all {n} files must produce a result");
+
+        let result_paths: HashSet<String> = results.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            result_paths, expected_paths,
+            "every input path must appear in output exactly once"
+        );
+        assert_eq!(results.len(), result_paths.len(), "no duplicates at scale");
+    }
+
+    // ── Test 4: single worker (degenerate case) ───────────────────────────────
+    // num_workers=1 means exactly one poison pill is pushed. If the pill logic
+    // uses the wrong count, the worker either never exits (too few pills) or a
+    // pill is wasted and a real job is lost (too many pills processed by worker).
+    #[test]
+    fn test_single_worker_processes_all_files() {
+        let files: Vec<String> = (0..5)
+            .map(|i| make_log(&format!("1w_{i}"), i + 1))
+            .collect();
+        let expected_paths: HashSet<String> = files.iter().cloned().collect();
+
+        let results = process_batch(files, 1, None);
+
+        assert_eq!(results.len(), 5, "single worker must process all 5 files");
+        let result_paths: HashSet<String> = results.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(result_paths, expected_paths);
+    }
+
+    // ── Test 5: zero workers clamped to one ───────────────────────────────────
+    // Caller passes 0; the clamp to max(1) must prevent a panic (spawning 0
+    // workers then pushing 1 pill would leave it unconsumed, blocking forever).
+    #[test]
+    fn test_zero_workers_clamped_to_one() {
+        let files = vec![make_log("0w", 1)];
+        let results = process_batch(files, 0, None);
+        assert_eq!(results.len(), 1, "clamped-to-1 worker must still process the file");
     }
 }
