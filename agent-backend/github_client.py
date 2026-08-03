@@ -34,7 +34,11 @@ def _analyze_log(log_text: str) -> "dict | str":
     Structured log analysis via Rust binary when available; raw tail otherwise.
     Returns a dict {failed_tests, error_signatures, stack_traces, line_count}
     or a plain string (last MAX_LOG_LINES lines) if the binary isn't present.
+    Also ships the raw log to the Java ingestor asynchronously for metrics.
     """
+    from ingestor_client import fire_and_forget
+    fire_and_forget(log_text)  # non-blocking; daemon thread; never delays caller
+
     if pathlib.Path(_LOG_ANALYZER_BIN).exists():
         try:
             proc = subprocess.run(

@@ -395,6 +395,13 @@ async def search_runbooks_endpoint(body: dict):
     return search_runbooks_db(vec, top_k=top_k)
 
 
+@app.get("/ingestor-metrics")
+async def ingestor_metrics():
+    """Live metrics from the Java log-ingestor (received/processed/rejected/queueDepth)."""
+    from ingestor_client import get_metrics
+    return await get_metrics()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     """Serve the incident dashboard."""

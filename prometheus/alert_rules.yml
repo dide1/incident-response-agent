@@ -19,8 +19,41 @@ groups:
             {{ $labels.job }} error rate is {{ $value | humanizePercentage }}
             (threshold: 50%). Possible bad deploy or downstream dependency failure.
 
-      # Fires when P99 latency exceeds 2s for at least 30s (N+1 query symptom)
-      - alert: HighLatency
+  - name: log_ingestor
+    interval: 15s
+    rules:
+      # Fires when any logs have been rejected (queue full) in the past 5 minutes.
+      # Sustained rejections mean CI log analysis is falling behind.
+      - alert: LogIngestorQueueSaturation
+        expr: increase(log_ingestor_rejected_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Log ingestor dropping CI logs"
+          description: >
+            {{ $value | humanize }} CI logs were rejected in the last 5 minutes because
+            the ingestor queue was full. Increase QUEUE_CAPACITY or WORKERS, or check
+            for a processing stall.
+
+      # Fires when the queue has been deeply backed up for 2+ minutes,
+      # indicating workers are stalled (e.g. OOM, deadlock).
+      - alert: LogIngestorProcessingStalled
+        expr: log_ingestor_queue_depth > 50
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Log ingestor queue backing up"
+          description: >
+            Queue depth is {{ $value }} (threshold: 50) and has been elevated for 2+
+            minutes. Workers may be stalled. Check container logs and memory usage.
+
+  - name: service_health
+    interval: 15s
+    rules:
+      # Fires when >50% of requests are returning 5xx for at least 30s
+      - alert: HighErrorRate
         expr: |
           histogram_quantile(
             0.99,

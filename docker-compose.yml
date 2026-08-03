@@ -80,6 +80,24 @@ services:
     networks:
       - incident-net
 
+  log-ingestor:
+    image: log-ingestor:latest
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    environment:
+      - PORT=8080
+      - QUEUE_CAPACITY=${LOG_INGESTOR_QUEUE_CAPACITY:-200}
+      - WORKERS=${LOG_INGESTOR_WORKERS:-}       # empty → availableProcessors()
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    networks:
+      - incident-net
+
   agent-backend:
     build: ./agent-backend
     restart: unless-stopped
@@ -94,10 +112,13 @@ services:
       - GITHUB_REPOS=${GITHUB_REPOS:-}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - GITHUB_POLL_INTERVAL=${GITHUB_POLL_INTERVAL:-120}
+      - LOG_INGESTOR_URL=http://log-ingestor:8080
     volumes:
       - ./runbooks:/runbooks:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      log-ingestor:
         condition: service_healthy
     networks:
       - incident-net
